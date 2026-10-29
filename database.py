@@ -118,10 +118,18 @@ def initialize() -> None:
                     row["Field"]
                     for row in connection.execute("SHOW COLUMNS FROM guild_settings").fetchall()
                 }
-                if "command_prefix" not in guild_columns:
-                    connection.execute(
-                        "ALTER TABLE guild_settings ADD COLUMN command_prefix VARCHAR(5) NOT NULL DEFAULT '!'"
-                    )
+                guild_migrations = {
+                    "command_prefix": "VARCHAR(5) NOT NULL DEFAULT '!'",
+                    "welcome_channel_id": "BIGINT NULL",
+                    "welcome_message": "VARCHAR(4096) NOT NULL DEFAULT 'Welcome {mention} to {server}! You are member #{member_count}.'",
+                    "welcome_title": "VARCHAR(256) NOT NULL DEFAULT 'Welcome to {server}!'",
+                    "welcome_color": "VARCHAR(7) NOT NULL DEFAULT '#FF9ECF'",
+                }
+                for column, definition in guild_migrations.items():
+                    if column not in guild_columns:
+                        connection.execute(
+                            f"ALTER TABLE guild_settings ADD COLUMN {column} {definition}"
+                        )
                 connection.execute(
                     """CREATE TABLE IF NOT EXISTS feature_suggestions (
                         id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -164,10 +172,18 @@ def initialize() -> None:
                     row["name"]
                     for row in connection.execute("PRAGMA table_info(guild_settings)")
                 }
-                if "command_prefix" not in guild_columns:
-                    connection.execute(
-                        "ALTER TABLE guild_settings ADD COLUMN command_prefix TEXT NOT NULL DEFAULT '!'"
-                    )
+                guild_migrations = {
+                    "command_prefix": "TEXT NOT NULL DEFAULT '!'",
+                    "welcome_channel_id": "INTEGER",
+                    "welcome_message": "TEXT NOT NULL DEFAULT 'Welcome {mention} to {server}! You are member #{member_count}.'",
+                    "welcome_title": "TEXT NOT NULL DEFAULT 'Welcome to {server}!'",
+                    "welcome_color": "TEXT NOT NULL DEFAULT '#FF9ECF'",
+                }
+                for column, definition in guild_migrations.items():
+                    if column not in guild_columns:
+                        connection.execute(
+                            f"ALTER TABLE guild_settings ADD COLUMN {column} {definition}"
+                        )
                 connection.execute(
                     """CREATE TABLE IF NOT EXISTS feature_suggestions (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -209,18 +225,19 @@ def get_guild_settings(guild_id: int) -> dict:
         row = connection.execute(
             "SELECT * FROM guild_settings WHERE guild_id = ?", (guild_id,)
         ).fetchone()
-    return (
-        dict(row)
-        if row
-        else {
-            "guild_id": guild_id,
-            "command_prefix": DEFAULT_PREFIX,
-            "welcome_channel_id": None,
-            "welcome_message": "Welcome {mention} to {server}! You are member #{member_count}.",
-            "welcome_title": "Welcome to {server}!",
-            "welcome_color": "#FF9ECF",
-        }
-    )
+    settings = {
+        "guild_id": guild_id,
+        "command_prefix": DEFAULT_PREFIX,
+        "welcome_channel_id": None,
+        "welcome_message": "Welcome {mention} to {server}! You are member #{member_count}.",
+        "welcome_title": "Welcome to {server}!",
+        "welcome_color": "#FF9ECF",
+    }
+    if row:
+        settings.update(
+            {key: value for key, value in dict(row).items() if value is not None}
+        )
+    return settings
 
 
 @lru_cache(maxsize=1024)
@@ -230,7 +247,7 @@ def get_command_prefix(guild_id: int) -> str:
             "SELECT command_prefix FROM guild_settings WHERE guild_id = ?",
             (guild_id,),
         ).fetchone()
-    return row["command_prefix"] if row else DEFAULT_PREFIX
+    return row["command_prefix"] if row and row["command_prefix"] else DEFAULT_PREFIX
 
 
 def set_command_prefix(guild_id: int, prefix: str) -> None:

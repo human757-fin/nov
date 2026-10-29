@@ -208,17 +208,17 @@ async def login(request: web.Request) -> web.Response:
     attempts.clear()
     nonce = secrets.token_urlsafe(24)
     expires_at = int(time.time()) + SESSION_TTL
-    response = web.HTTPSeeOther("/")
+    response = web.Response(status=303, headers={"Location": "/"})
     response.set_cookie(
         COOKIE_NAME,
         _session_cookie(nonce, expires_at),
         max_age=SESSION_TTL,
         httponly=True,
         secure=config.WEBUI_SECURE_COOKIE,
-        samesite="Strict",
+        samesite="Lax",
         path="/",
     )
-    raise response
+    return response
 
 
 async def dashboard(request: web.Request) -> web.Response:

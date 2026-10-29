@@ -12,7 +12,7 @@ import time
 from collections import defaultdict, deque
 from pathlib import Path
 from string import Formatter
-from urllib.parse import urlencode
+from urllib.parse import urlsplit, urlencode
 
 from aiohttp import web
 
@@ -97,9 +97,28 @@ async def security_middleware(request: web.Request, handler):
 
 def _check_csrf(request: web.Request, form) -> None:
     origin = request.headers.get("Origin")
-    expected_origin = config.WEBUI_PUBLIC_ORIGIN or f"{request.scheme}://{request.host}"
-    if origin and origin.rstrip("/") != expected_origin:
-        raise web.HTTPForbidden(text="Request origin was rejected.")
+    if origin:
+        forwarded_proto = request.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip()
+        scheme = forwarded_proto or request.scheme
+        expected_origin = config.WEBUI_PUBLIC_ORIGIN or f"{scheme}://{request.host}"
+        try:
+            supplied = urlsplit(origin)
+            expected = urlsplit(expected_origin)
+            valid_origin = (
+                supplied.scheme.lower() in {"http", "https"}
+                and supplied.netloc
+                and not supplied.username
+                and not supplied.password
+                and supplied.scheme.lower() == expected.scheme.lower()
+                and supplied.netloc.lower() == expected.netloc.lower()
+                and not supplied.path
+                and not supplied.query
+                and not supplied.fragment
+            )
+        except ValueError:
+            valid_origin = False
+        if not valid_origin:
+            raise web.HTTPForbidden(text="Request origin was rejected.")
     supplied = form.get("csrf", "")
     if not hmac.compare_digest(str(supplied), request["csrf"]):
         raise web.HTTPForbidden(text="Your session expired. Reload the page and try again.")

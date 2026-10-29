@@ -6,9 +6,11 @@ import hashlib
 import hmac
 import html
 import logging
+import os
 import secrets
 import time
 from collections import defaultdict, deque
+from pathlib import Path
 from string import Formatter
 from urllib.parse import urlencode
 
@@ -20,7 +22,20 @@ import database
 COOKIE_NAME = "nov_web_session"
 AUTH_LOG = logging.getLogger("webpanel.auth")
 SESSION_TTL = 8 * 60 * 60
-SESSION_SECRET = secrets.token_bytes(32)
+# Keep signed sessions valid when Pterodactyl restarts only the panel process.
+# Store a random key beside the app instead of regenerating it at each startup.
+_SESSION_KEY_FILE = Path(__file__).with_name(".webpanel-session-key")
+try:
+    SESSION_SECRET = _SESSION_KEY_FILE.read_bytes()
+except FileNotFoundError:
+    SESSION_SECRET = secrets.token_bytes(32)
+    try:
+        fd = os.open(_SESSION_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        SESSION_SECRET = _SESSION_KEY_FILE.read_bytes()
+    else:
+        with os.fdopen(fd, "wb") as key_file:
+            key_file.write(SESSION_SECRET)
 LOGIN_ATTEMPTS: dict[str, deque[float]] = defaultdict(deque)
 ALLOWED_STATUSES = {"pending", "approved", "denied", "implemented"}
 ALLOWED_PLACEHOLDERS = {"mention", "server", "member_count", "username"}

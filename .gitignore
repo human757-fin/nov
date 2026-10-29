@@ -14,6 +14,7 @@ wheels/
 .env
 *.env
 .env.*
+.webpanel-session-key
 
 # Local server settings
 catgirl.sqlite3

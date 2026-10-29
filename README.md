@@ -12,7 +12,7 @@ A small, multi-purpose Discord bot for our server. It uses Python 3.12+, `discor
    ADMIN_ROLE_ID=123456789012345678
    ```
 
-   `ADMIN_ROLE_ID` can be `0` if you do not use a dedicated bot-admin role. The bot owner and server owner can still use the owner-gated `!sync` command.
+   `ADMIN_ROLE_ID` can be `0` if you do not use a dedicated bot-admin role. Admin-level commands are limited to the server owner, Discord administrators, and members with this configured role.
 3. In the Discord Developer Portal, enable the **Server Members Intent** and **Message Content Intent** for the bot. Invite it with the permissions needed for moderation and to send embeds.
 4. Start it with `uv run python bot.py`.
 
@@ -53,14 +53,15 @@ Moderators with the corresponding Discord permissions can use `/ban`, `/kick`, `
 ### Utilities
 
 - `!ping` and `/ping` show the bot's latency.
-- `!sync dev` copies the current application commands to this server for fast testing. It can show duplicate entries while global commands also exist. Use `!sync clear` to remove this server's copies when testing is done; global commands remain available. `!sync global` publishes the current application commands globally and may take up to an hour to appear. Bare `!sync` is an alias for `!sync clear`. The sync command is limited to the bot owner, server owner, and configured admin role.
+- `!prefix` shows this server's prefix. The server owner, a Discord administrator, or a member with the configured admin role can change it with `!prefix set ?`. Prefixes are per-server, allow 1–5 printable characters without spaces, and default to `!`.
+- `!sync dev` copies the current application commands to this server for fast testing. It can show duplicate entries while global commands also exist. Use `!sync clear` to remove this server's copies when testing is done; global commands remain available. `!sync global` publishes the current application commands globally and may take up to an hour to appear. Bare `!sync` is an alias for `!sync clear`. Only the server owner, Discord administrators, and configured admin role can use sync commands.
 
 ### Feature suggestions
 
 - `/suggest idea` lets any server member submit a feature idea. Suggestions are saved in the local SQLite database and scoped to the server they came from.
-- `/suggestions` privately lists suggestions and their statuses, newest first, eight per page. Add the `page` option to browse older suggestions. Only the bot owner, server owner, and configured admin role can review them.
+- `/suggestions` privately lists suggestions and their statuses, newest first, eight per page. Add the `page` option to browse older suggestions. Only the server owner, Discord administrators, and configured admin role can review them.
 - `/mysuggestions` privately lists your own submissions and statuses.
-- `/suggestion-status` lets reviewers mark a suggestion pending, approved, denied, or implemented. Setting a suggestion to denied sends its author a private DM, including an optional reviewer note. If the author has DMs disabled, the command reports that the notification could not be delivered.
+- `/suggestion-status` lets authorized reviewers mark a suggestion pending, approved, denied, or implemented. Setting a suggestion to denied sends its author a private DM, including an optional reviewer note. If the author has DMs disabled, the command reports that the notification could not be delivered.
 - `/features` publicly lists built-in user-facing capabilities and community suggestions marked approved or implemented. It covers moderation, welcome embeds, ping, and suggestions; admin-only maintenance commands are excluded.
 
 ## Project layout

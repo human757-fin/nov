@@ -1,9 +1,10 @@
 # cogs/utils.py
 from typing import Literal, Optional
 
-import discord  # noqa: F401
+import discord
 from discord.ext import commands
 
+import database
 from checks import is_bot_admin
 
 
@@ -17,7 +18,43 @@ class Utils(commands.Cog):
         latency = round(self.bot.latency * 1000)
         await ctx.send(f"Pong! `{latency}ms`")
 
-    # Prefix-only, owner-only: !sync
+    @commands.group(name="prefix", invoke_without_command=True)
+    async def prefix(self, ctx: commands.Context):
+        if ctx.guild is None:
+            return await ctx.send("Prefixes are configured separately for each server.")
+        current = database.get_command_prefix(ctx.guild.id)
+        await ctx.send(
+            f"This server's prefix is {current!r}. An admin can change it with "
+            f"{current}prefix set <new prefix>."
+        )
+
+    @prefix.command(name="set")
+    @commands.guild_only()
+    @is_bot_admin()
+    async def set_prefix(self, ctx: commands.Context, new_prefix: str):
+        if (
+            not 1 <= len(new_prefix) <= 5
+            or not new_prefix.isprintable()
+            or any(character.isspace() for character in new_prefix)
+        ):
+            return await ctx.send("Choose a prefix with 1–5 printable characters and no spaces.")
+
+        database.set_command_prefix(ctx.guild.id, new_prefix)
+        await ctx.send(
+            f"Prefix changed to {new_prefix!r}. Use {new_prefix}ping to check it.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @set_prefix.error
+    async def set_prefix_error(self, ctx: commands.Context, error):
+        if isinstance(error, commands.CheckFailure):
+            await ctx.send(
+                "Only the server owner, a server administrator, or the configured admin role can change the prefix."
+            )
+        else:
+            raise error
+
+    # Prefix-only, admin-only: !sync
     @commands.command(name="sync")
     @is_bot_admin()
     async def sync(

@@ -42,11 +42,11 @@ BUILT_IN_FEATURES = [
 
 def can_review_suggestions():
     async def predicate(interaction: discord.Interaction) -> bool:
-        if await interaction.client.is_owner(interaction.user):
-            return True
         if interaction.guild is None:
             return False
         if interaction.user.id == interaction.guild.owner_id:
+            return True
+        if interaction.user.guild_permissions.administrator:
             return True
         return config.ADMIN_ROLE_ID != 0 and any(
             role.id == config.ADMIN_ROLE_ID for role in interaction.user.roles
@@ -324,7 +324,7 @@ class Suggestions(commands.Cog):
     ):
         if isinstance(error, app_commands.CheckFailure):
             await interaction.response.send_message(
-                "Only the bot owner, server owner, or configured admin role can review suggestions.",
+                "Only the server owner, a server administrator, or configured admin role can review suggestions.",
                 ephemeral=True,
             )
         else:

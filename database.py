@@ -3,11 +3,13 @@
 import sqlite3
 import ssl
 from contextlib import closing
+from functools import lru_cache
 from pathlib import Path
 
 import config
 
 DB_PATH = Path(__file__).parent / "catgirl.sqlite3"
+DEFAULT_PREFIX = "!"
 
 
 class _Connection:
@@ -105,12 +107,21 @@ def initialize() -> None:
                 connection.execute(
                     """CREATE TABLE IF NOT EXISTS guild_settings (
                         guild_id BIGINT NOT NULL PRIMARY KEY,
+                        command_prefix VARCHAR(5) NOT NULL DEFAULT '!',
                         welcome_channel_id BIGINT NULL,
                         welcome_message VARCHAR(4096) NOT NULL DEFAULT 'Welcome {mention} to {server}! You are member #{member_count}.',
                         welcome_title VARCHAR(256) NOT NULL DEFAULT 'Welcome to {server}!',
                         welcome_color VARCHAR(7) NOT NULL DEFAULT '#FF9ECF'
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
                 )
+                guild_columns = {
+                    row["Field"]
+                    for row in connection.execute("SHOW COLUMNS FROM guild_settings").fetchall()
+                }
+                if "command_prefix" not in guild_columns:
+                    connection.execute(
+                        "ALTER TABLE guild_settings ADD COLUMN command_prefix VARCHAR(5) NOT NULL DEFAULT '!'"
+                    )
                 connection.execute(
                     """CREATE TABLE IF NOT EXISTS feature_suggestions (
                         id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -142,12 +153,21 @@ def initialize() -> None:
                 connection.execute(
                     """CREATE TABLE IF NOT EXISTS guild_settings (
                         guild_id INTEGER PRIMARY KEY,
+                        command_prefix TEXT NOT NULL DEFAULT '!',
                         welcome_channel_id INTEGER,
                         welcome_message TEXT NOT NULL DEFAULT 'Welcome {mention} to {server}! You are member #{member_count}.',
                         welcome_title TEXT NOT NULL DEFAULT 'Welcome to {server}!',
                         welcome_color TEXT NOT NULL DEFAULT '#FF9ECF'
                     )"""
                 )
+                guild_columns = {
+                    row["name"]
+                    for row in connection.execute("PRAGMA table_info(guild_settings)")
+                }
+                if "command_prefix" not in guild_columns:
+                    connection.execute(
+                        "ALTER TABLE guild_settings ADD COLUMN command_prefix TEXT NOT NULL DEFAULT '!'"
+                    )
                 connection.execute(
                     """CREATE TABLE IF NOT EXISTS feature_suggestions (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -194,12 +214,38 @@ def get_guild_settings(guild_id: int) -> dict:
         if row
         else {
             "guild_id": guild_id,
+            "command_prefix": DEFAULT_PREFIX,
             "welcome_channel_id": None,
             "welcome_message": "Welcome {mention} to {server}! You are member #{member_count}.",
             "welcome_title": "Welcome to {server}!",
             "welcome_color": "#FF9ECF",
         }
     )
+
+
+@lru_cache(maxsize=1024)
+def get_command_prefix(guild_id: int) -> str:
+    with closing(_connect()) as connection, connection:
+        row = connection.execute(
+            "SELECT command_prefix FROM guild_settings WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()
+    return row["command_prefix"] if row else DEFAULT_PREFIX
+
+
+def set_command_prefix(guild_id: int, prefix: str) -> None:
+    with closing(_connect()) as connection, connection:
+        insert_statement = (
+            "INSERT IGNORE INTO guild_settings (guild_id) VALUES (?)"
+            if connection.engine == "mysql"
+            else "INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)"
+        )
+        connection.execute(insert_statement, (guild_id,))
+        connection.execute(
+            "UPDATE guild_settings SET command_prefix = ? WHERE guild_id = ?",
+            (prefix, guild_id),
+        )
+    get_command_prefix.cache_clear()
 
 
 def get_dashboard_guild_ids() -> list[int]:

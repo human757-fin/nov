@@ -80,5 +80,14 @@ class Catgirl(commands.Bot):
         await super().close()
 
 
-bot = Catgirl(command_prefix="!", intents=intents)
+async def get_prefix(_bot: Catgirl, message: discord.Message):
+    prefix = (
+        database.get_command_prefix(message.guild.id)
+        if message.guild is not None
+        else database.DEFAULT_PREFIX
+    )
+    return commands.when_mentioned_or(prefix)(_bot, message)
+
+
+bot = Catgirl(command_prefix=get_prefix, intents=intents)
 bot.run(config.TOKEN)

@@ -84,7 +84,7 @@ class Moderation(commands.Cog):
             user = await self.bot.fetch_user(int(user_id))
             await interaction.guild.unban(user)
             await interaction.response.send_message(f"Unbanned **{user}**.")
-        except ValueError, discord.NotFound:
+        except (ValueError, discord.NotFound):
             await interaction.response.send_message(
                 "Couldn't find a banned user with that ID.", ephemeral=True
             )

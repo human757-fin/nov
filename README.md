@@ -1,6 +1,6 @@
 # CATGIRL BOT
 
-A small, multi-purpose Discord bot for our server. It uses Python 3.14+, `discord.py`, and SQLite.
+A small, multi-purpose Discord bot for our server. It uses Python 3.12+, `discord.py`, and SQLite or MySQL/MariaDB.
 
 ## Setup
 
@@ -18,7 +18,7 @@ A small, multi-purpose Discord bot for our server. It uses Python 3.14+, `discor
 
 ## Management web panel
 
-`webpanel.py` is a separate, password-protected management page for welcome settings and recent feature suggestions. It shares the bot database. Set Pterodactyl's `WEB_PANEL_PASSWORD` to a password with at least 16 characters before starting the panel. The panel binds to `0.0.0.0` by default and uses `WEB_PANEL_PORT`, then `WEBUI_PORT`, then Pterodactyl's `SERVER_PORT`, then `8080` as its port. Allocate that port in Pterodactyl's server settings and open the server address with that port in a browser.
+`webpanel.py` is a separate, password-protected management page for welcome settings and recent feature suggestions. It shares the bot database. Set Pterodactyl's `WEB_PANEL_PASSWORD` to a password with at least 16 characters before starting the panel. The panel binds to `0.0.0.0` by default and uses `WEB_PANEL_PORT`, `WEBUI_PORT`, `WEB_PORT`, `PANEL_PORT`, or `PORT`, then `8080` as its port. Allocate that port in Pterodactyl's server settings and open the server address with that port in a browser.
 
 The panel and bot both use the configured database engine. `DB_ENGINE=sqlite` is the default. For MySQL or MariaDB, use `DB_ENGINE=mysql` and provide `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USERNAME`, and `DB_PASSWORD`; optional TLS is enabled by `DB_TLS=1` and verifies the server certificate. `DB_TLS_CA` can point to a custom CA certificate. The MySQL driver is included in `requirements.txt` and the project dependencies.
 

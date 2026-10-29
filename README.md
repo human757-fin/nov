@@ -16,7 +16,21 @@ A small, multi-purpose Discord bot for our server. It uses Python 3.14+, `discor
 3. In the Discord Developer Portal, enable the **Server Members Intent** and **Message Content Intent** for the bot. Invite it with the permissions needed for moderation and to send embeds.
 4. Start it with `uv run python bot.py`.
 
-The bot creates `catgirl.sqlite3` next to `bot.py` on startup. It stores each server's welcome settings locally. Keep the database file to preserve those settings; do not commit it.
+## Management web panel
+
+`webpanel.py` is a separate, password-protected management page for welcome settings and recent feature suggestions. It shares the bot database. Set Pterodactyl's `WEB_PANEL_PASSWORD` to a password with at least 16 characters before starting the panel. The panel binds to `0.0.0.0` by default and uses `WEB_PANEL_PORT`, then `WEBUI_PORT`, then Pterodactyl's `SERVER_PORT`, then `8080` as its port. Allocate that port in Pterodactyl's server settings and open the server address with that port in a browser.
+
+The panel and bot both use the configured database engine. `DB_ENGINE=sqlite` is the default. For MySQL or MariaDB, use `DB_ENGINE=mysql` and provide `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USERNAME`, and `DB_PASSWORD`; optional TLS is enabled by `DB_TLS=1` and verifies the server certificate. `DB_TLS_CA` can point to a custom CA certificate. The MySQL driver is included in `requirements.txt` and the project dependencies.
+
+`BOT_HEALTH_PORT` starts a separate `/healthz` endpoint in the bot process; it returns success only after Discord reports the bot ready. `DEV_GUILD_ID` immediately syncs the current application commands to that server during startup. `LOG_LEVEL` sets console logging detail.
+
+The panel can edit welcome channel IDs, titles, messages, and colors, and review suggestion statuses and notes. Denying a suggestion from the panel updates its stored status and note but does not send the submitter a Discord DM; use `/suggestion-status` when a denial DM is needed.
+
+If the panel is reachable over the internet, put it behind HTTPS. For an HTTPS reverse proxy, set `WEBUI_PUBLIC_ORIGIN` to the exact browser origin (for example, `https://bot.example.com`) and set `SECURE_WEB_COOKIE=1`. Do not send the management password over plain HTTP. The panel prints a warning when secure cookies are disabled.
+
+The Pterodactyl startup command can launch the panel with `python webpanel.py &` before starting the bot. The included `requirements.txt` ensures the panel's `aiohttp` dependency is installed by the supplied startup flow.
+
+With SQLite, the app creates `catgirl.sqlite3` next to `bot.py` on startup; keep it to preserve settings and do not commit it. With MySQL or MariaDB, the app stores data in the configured database instead.
 
 ## Core features
 

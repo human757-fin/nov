@@ -1,58 +1,187 @@
 """Small SQLite store for per-server bot settings."""
 
 import sqlite3
+import ssl
 from contextlib import closing
 from pathlib import Path
+
+import config
 
 DB_PATH = Path(__file__).parent / "catgirl.sqlite3"
 
 
-def _connect() -> sqlite3.Connection:
-    connection = sqlite3.connect(DB_PATH)
-    connection.row_factory = sqlite3.Row
-    return connection
+class _Connection:
+    def __init__(self, raw, engine: str):
+        self.raw = raw
+        self.engine = engine
+
+    def execute(self, query: str, params=()):
+        if self.engine == "sqlite":
+            return self.raw.execute(query, params)
+        cursor = self.raw.cursor()
+        cursor.execute(query.replace("?", "%s"), params)
+        return cursor
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self.engine == "sqlite":
+            return self.raw.__exit__(exc_type, exc_value, traceback)
+        if exc_type is None:
+            self.raw.commit()
+        else:
+            self.raw.rollback()
+        return False
+
+    def close(self):
+        self.raw.close()
+
+
+def _connect() -> _Connection:
+    engine = config.DATABASE_ENGINE
+    if engine in {"mysql", "mariadb"}:
+        required = {
+            "DB_HOST": config.DATABASE_HOST,
+            "DB_NAME": config.DATABASE_NAME,
+            "DB_USERNAME": config.DATABASE_USERNAME,
+            "DB_PASSWORD": config.DATABASE_PASSWORD,
+        }
+        missing = [name for name, value in required.items() if not value]
+        if missing:
+            raise RuntimeError(
+                "Missing database environment settings: " + ", ".join(missing)
+            )
+        try:
+            import pymysql
+        except ImportError as error:
+            raise RuntimeError(
+                "MySQL/MariaDB support needs PyMySQL; install the project requirements."
+            ) from error
+
+        tls_options = {}
+        if config.DATABASE_TLS:
+            tls_context = ssl.create_default_context(cafile=config.DATABASE_TLS_CA)
+            tls_options["ssl"] = tls_context
+        else:
+            tls_options["ssl_disabled"] = True
+        raw = pymysql.connect(
+            host=config.DATABASE_HOST,
+            port=config.DATABASE_PORT,
+            user=config.DATABASE_USERNAME,
+            password=config.DATABASE_PASSWORD,
+            database=config.DATABASE_NAME,
+            charset="utf8mb4",
+            cursorclass=pymysql.cursors.DictCursor,
+            connect_timeout=10,
+            autocommit=False,
+            **tls_options,
+        )
+        return _Connection(raw, "mysql")
+    if engine not in {"sqlite", ""}:
+        raise RuntimeError("DB_ENGINE must be sqlite, mysql, or mariadb.")
+    raw = sqlite3.connect(DB_PATH)
+    raw.row_factory = sqlite3.Row
+    return _Connection(raw, "sqlite")
 
 
 def initialize() -> None:
     with closing(_connect()) as connection, connection:
-        connection.execute(
-            """CREATE TABLE IF NOT EXISTS guild_settings (
-                guild_id INTEGER PRIMARY KEY,
-                welcome_channel_id INTEGER,
-                welcome_message TEXT NOT NULL DEFAULT 'Welcome {mention} to {server}! You are member #{member_count}.',
-                welcome_title TEXT NOT NULL DEFAULT 'Welcome to {server}!',
-                welcome_color TEXT NOT NULL DEFAULT '#FF9ECF'
-            )"""
-        )
-        connection.execute(
-            """CREATE TABLE IF NOT EXISTS feature_suggestions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                submitter TEXT NOT NULL,
-                suggestion TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                status TEXT NOT NULL DEFAULT 'pending',
-                status_note TEXT,
-                status_updated_by INTEGER,
-                status_updated_at TEXT
-            )"""
-        )
-        columns = {
-            row["name"]
-            for row in connection.execute("PRAGMA table_info(feature_suggestions)")
-        }
-        migrations = {
-            "status": "TEXT NOT NULL DEFAULT 'pending'",
-            "status_note": "TEXT",
-            "status_updated_by": "INTEGER",
-            "status_updated_at": "TEXT",
-        }
-        for column, definition in migrations.items():
-            if column not in columns:
+        # Serialize schema creation/migrations because Pterodactyl starts the
+        # web panel and bot as separate processes against the same database.
+        is_mysql = connection.engine == "mysql"
+        lock_name = "nov_bot_schema"
+        if is_mysql:
+            lock = connection.execute(
+                "SELECT GET_LOCK(?, 10) AS acquired", (lock_name,)
+            ).fetchone()
+            if lock is None or lock["acquired"] != 1:
+                raise RuntimeError("Could not acquire the database schema lock.")
+        else:
+            connection.execute("BEGIN IMMEDIATE")
+
+        try:
+            if is_mysql:
                 connection.execute(
-                    f"ALTER TABLE feature_suggestions ADD COLUMN {column} {definition}"
+                    """CREATE TABLE IF NOT EXISTS guild_settings (
+                        guild_id BIGINT NOT NULL PRIMARY KEY,
+                        welcome_channel_id BIGINT NULL,
+                        welcome_message VARCHAR(4096) NOT NULL DEFAULT 'Welcome {mention} to {server}! You are member #{member_count}.',
+                        welcome_title VARCHAR(256) NOT NULL DEFAULT 'Welcome to {server}!',
+                        welcome_color VARCHAR(7) NOT NULL DEFAULT '#FF9ECF'
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
                 )
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS feature_suggestions (
+                        id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                        guild_id BIGINT NOT NULL,
+                        user_id BIGINT NOT NULL,
+                        submitter VARCHAR(256) NOT NULL,
+                        suggestion TEXT NOT NULL,
+                        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        status VARCHAR(16) NOT NULL DEFAULT 'pending',
+                        status_note VARCHAR(500) NULL,
+                        status_updated_by BIGINT NULL,
+                        status_updated_at TIMESTAMP NULL,
+                        INDEX feature_suggestions_guild_id_id (guild_id, id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
+                )
+                columns = {
+                    row["Field"]
+                    for row in connection.execute(
+                        "SHOW COLUMNS FROM feature_suggestions"
+                    ).fetchall()
+                }
+                migrations = {
+                    "status": "VARCHAR(16) NOT NULL DEFAULT 'pending'",
+                    "status_note": "VARCHAR(500) NULL",
+                    "status_updated_by": "BIGINT NULL",
+                    "status_updated_at": "TIMESTAMP NULL",
+                }
+            else:
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS guild_settings (
+                        guild_id INTEGER PRIMARY KEY,
+                        welcome_channel_id INTEGER,
+                        welcome_message TEXT NOT NULL DEFAULT 'Welcome {mention} to {server}! You are member #{member_count}.',
+                        welcome_title TEXT NOT NULL DEFAULT 'Welcome to {server}!',
+                        welcome_color TEXT NOT NULL DEFAULT '#FF9ECF'
+                    )"""
+                )
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS feature_suggestions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        guild_id INTEGER NOT NULL,
+                        user_id INTEGER NOT NULL,
+                        submitter TEXT NOT NULL,
+                        suggestion TEXT NOT NULL,
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        status_note TEXT,
+                        status_updated_by INTEGER,
+                        status_updated_at TEXT
+                    )"""
+                )
+                columns = {
+                    row["name"]
+                    for row in connection.execute(
+                        "PRAGMA table_info(feature_suggestions)"
+                    )
+                }
+                migrations = {
+                    "status": "TEXT NOT NULL DEFAULT 'pending'",
+                    "status_note": "TEXT",
+                    "status_updated_by": "INTEGER",
+                    "status_updated_at": "TEXT",
+                }
+            for column, definition in migrations.items():
+                if column not in columns:
+                    connection.execute(
+                        f"ALTER TABLE feature_suggestions ADD COLUMN {column} {definition}"
+                    )
+        finally:
+            if is_mysql:
+                connection.execute("SELECT RELEASE_LOCK(?)", (lock_name,)).fetchone()
 
 
 def get_guild_settings(guild_id: int) -> dict:
@@ -73,6 +202,29 @@ def get_guild_settings(guild_id: int) -> dict:
     )
 
 
+def get_dashboard_guild_ids() -> list[int]:
+    """Return guilds with saved settings or suggestions for the management panel."""
+    with closing(_connect()) as connection, connection:
+        rows = connection.execute(
+            """SELECT guild_id FROM guild_settings
+            UNION SELECT guild_id FROM feature_suggestions
+            ORDER BY guild_id"""
+        ).fetchall()
+    return [row["guild_id"] for row in rows]
+
+
+def get_dashboard_suggestions(guild_id: int, limit: int = 100) -> list[dict]:
+    """Return recent suggestions and review fields for the management panel."""
+    with closing(_connect()) as connection, connection:
+        rows = connection.execute(
+            """SELECT id, user_id, submitter, suggestion, created_at, status, status_note
+            FROM feature_suggestions WHERE guild_id = ?
+            ORDER BY id DESC LIMIT ?""",
+            (guild_id, limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def update_guild_setting(guild_id: int, setting: str, value) -> None:
     allowed = {
         "welcome_channel_id",
@@ -83,9 +235,12 @@ def update_guild_setting(guild_id: int, setting: str, value) -> None:
     if setting not in allowed:
         raise ValueError(f"Unsupported setting: {setting}")
     with closing(_connect()) as connection, connection:
-        connection.execute(
-            "INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)", (guild_id,)
+        insert_statement = (
+            "INSERT IGNORE INTO guild_settings (guild_id) VALUES (?)"
+            if connection.engine == "mysql"
+            else "INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)"
         )
+        connection.execute(insert_statement, (guild_id,))
         connection.execute(
             f"UPDATE guild_settings SET {setting} = ? WHERE guild_id = ?",
             (value, guild_id),

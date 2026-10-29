@@ -55,6 +55,17 @@ class Moderation(commands.Cog):
         member: discord.Member,
         reason: str = "No reason given",
     ):
+        if member == interaction.user:
+            return await interaction.response.send_message(
+                "You can't kick yourself.", ephemeral=True
+            )
+        if (
+            member.top_role >= interaction.user.top_role
+            and interaction.user != interaction.guild.owner
+        ):
+            return await interaction.response.send_message(
+                "You can't kick someone with an equal or higher role.", ephemeral=True
+            )
         if member.top_role >= interaction.guild.me.top_role:
             return await interaction.response.send_message(
                 "My role is too low to kick that person.", ephemeral=True

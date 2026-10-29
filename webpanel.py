@@ -97,10 +97,11 @@ async def security_middleware(request: web.Request, handler):
 
 def _check_csrf(request: web.Request, form) -> None:
     origin = request.headers.get("Origin")
-    if origin:
-        forwarded_proto = request.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip()
-        scheme = forwarded_proto or request.scheme
-        expected_origin = config.WEBUI_PUBLIC_ORIGIN or f"{scheme}://{request.host}"
+    # A Pterodactyl egg/reverse proxy may not expose its public origin to the
+    # app. Enforce the explicit origin when configured; otherwise the
+    # session-bound CSRF token below remains the required protection.
+    if origin and config.WEBUI_PUBLIC_ORIGIN:
+        expected_origin = config.WEBUI_PUBLIC_ORIGIN
         try:
             supplied = urlsplit(origin)
             expected = urlsplit(expected_origin)

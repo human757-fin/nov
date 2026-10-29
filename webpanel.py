@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import html
+import logging
 import secrets
 import time
 from collections import defaultdict, deque
@@ -17,6 +18,7 @@ import config
 import database
 
 COOKIE_NAME = "nov_web_session"
+AUTH_LOG = logging.getLogger("webpanel.auth")
 SESSION_TTL = 8 * 60 * 60
 SESSION_SECRET = secrets.token_bytes(32)
 LOGIN_ATTEMPTS: dict[str, deque[float]] = defaultdict(deque)
@@ -60,6 +62,8 @@ async def security_middleware(request: web.Request, handler):
     if request.path not in {"/login", "/healthz"}:
         session = _read_session(request.cookies.get(COOKIE_NAME))
         if session is None:
+            if request.path != "/login":
+                AUTH_LOG.warning("Protected page requested without a valid panel session")
             raise web.HTTPSeeOther("/login")
         request["session_nonce"] = session[0]
         request["csrf"] = _csrf_for(session[0])
@@ -198,6 +202,7 @@ async def login(request: web.Request) -> web.Response:
     if not hmac.compare_digest(
         supplied.encode("utf-8"), config.WEBUI_PASSWORD.encode("utf-8")
     ):
+        AUTH_LOG.warning("Panel login rejected; submitted password did not match configuration")
         attempts.append(now)
         return web.Response(
             status=401,
@@ -206,6 +211,7 @@ async def login(request: web.Request) -> web.Response:
         )
 
     attempts.clear()
+    AUTH_LOG.info("Panel login accepted; issuing session cookie")
     nonce = secrets.token_urlsafe(24)
     expires_at = int(time.time()) + SESSION_TTL
     response = web.Response(status=303, headers={"Location": "/"})

@@ -16,7 +16,13 @@ def _env(*names: str, default: str = "") -> str:
 
 TOKEN = _env("DISCORD_TOKEN", "DISCORD_BOT_TOKEN") or None
 ADMIN_ROLE_ID = int(_env("ADMIN_ROLE_ID", default="0"))
-WEBUI_PASSWORD = _env("WEB_PANEL_PASSWORD", "WEBUI_PASSWORD")
+WEBUI_PASSWORD = _env(
+    "WEB_PANEL_PASSWORD",
+    "WEBPANEL_PASSWORD",
+    "PANEL_PASSWORD",
+    "WEB_PASSWORD",
+    "WEBUI_PASSWORD",
+)
 WEBUI_HOST = _env("WEBUI_HOST", "WEB_PANEL_HOST", default="0.0.0.0")
 WEBUI_PORT = int(
     _env("WEB_PANEL_PORT", "WEBUI_PORT", "WEB_PORT", "PANEL_PORT", "PORT", default="8080")

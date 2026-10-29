@@ -195,7 +195,9 @@ async def login(request: web.Request) -> web.Response:
 
     form = await request.post()
     supplied = str(form.get("password", ""))
-    if not hmac.compare_digest(supplied, config.WEBUI_PASSWORD):
+    if not hmac.compare_digest(
+        supplied.encode("utf-8"), config.WEBUI_PASSWORD.encode("utf-8")
+    ):
         attempts.append(now)
         return web.Response(
             status=401,

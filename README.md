@@ -22,7 +22,7 @@ A small, multi-purpose Discord bot for our server. It uses Python 3.12+, `discor
 
 The panel and bot both use the configured database engine. `DB_ENGINE=sqlite` is the default. For MySQL or MariaDB, use `DB_ENGINE=mysql` and provide `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USERNAME`, and `DB_PASSWORD`; optional TLS is enabled by `DB_TLS=1` and verifies the server certificate. `DB_TLS_CA` can point to a custom CA certificate. The MySQL driver is included in `requirements.txt` and the project dependencies.
 
-`BOT_HEALTH_PORT` starts a separate `/healthz` endpoint in the bot process; it returns success only after Discord reports the bot ready. `DEV_GUILD_ID` immediately syncs the current application commands to that server during startup. `LOG_LEVEL` sets console logging detail.
+`BOT_HEALTH_PORT` starts a separate `/healthz` endpoint in the bot process; it returns success only after Discord reports the bot ready. When `DEV_GUILD_ID` is set, startup clears server-scoped command copies in that server so they do not duplicate the bot's global commands. Global command changes may take time to appear; `!sync dev` can create temporary guild copies for fast testing, and `!sync clear` removes them. `LOG_LEVEL` sets console logging detail.
 
 The panel can edit welcome channel IDs, titles, messages, and colors, and review suggestion statuses and notes. Denying a suggestion from the panel updates its stored status and note but does not send the submitter a Discord DM; use `/suggestion-status` when a denial DM is needed.
 

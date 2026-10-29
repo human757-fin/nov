@@ -38,11 +38,13 @@ class Catgirl(commands.Bot):
 
         if config.DEV_GUILD_ID:
             guild = discord.Object(id=config.DEV_GUILD_ID)
-            self.tree.copy_global_to(guild=guild)
-            synced = await self.tree.sync(guild=guild)
+            # Global commands already appear in this server. Guild-scoped
+            # copies have the same names and make Discord show duplicates.
+            # Clear those copies while leaving the global commands untouched.
+            self.tree.clear_commands(guild=guild)
+            await self.tree.sync(guild=guild)
             logging.info(
-                "Synced %s application commands to development guild %s",
-                len(synced),
+                "Cleared guild-scoped command copies from development guild %s; global commands remain",
                 config.DEV_GUILD_ID,
             )
 

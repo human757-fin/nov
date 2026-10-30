@@ -48,7 +48,7 @@ Message and title text support `{mention}`, `{server}`, `{member_count}`, and `{
 
 ### Support tickets
 
-Configure the panel and log channel in the management panel. Add categories one per line using `emoji | title | description | optional Discord category channel ID`; the last field can place that ticket type under a Discord category. The bot posts or refreshes the ticket dropdown in the selected panel channel. Members can open one ticket at a time. Each ticket is private to the opener and configured admin roles, pings those roles and the opener, and has a close button with reasons. Closed tickets remain in their channel for staff review, and opening and closing events are sent to the configured log channel. The bot needs **Manage Channels**, **View Channel**, and **Send Messages** permissions in the panel, log, and ticket areas.
+Configure the panel and log channel in the management panel. Add categories one per line using `emoji | title | description | optional Discord category channel ID`; the last field can place that ticket type under a Discord category. The bot posts or refreshes the ticket dropdown in the selected panel channel automatically; an owner, administrator, or configured admin can run `/panel` to send or refresh it immediately. Members can open one ticket at a time. Each ticket is private to the opener and configured admin roles, pings those roles and the opener, and has a close button with reasons. Closed tickets remain in their channel for staff review, and opening and closing events are sent to the configured log channel. The bot needs **Manage Channels**, **View Channel**, **Send Messages**, and **Embed Links** permissions in the panel, log, and ticket areas.
 
 ### Moderation
 

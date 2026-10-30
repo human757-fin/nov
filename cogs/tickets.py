@@ -9,6 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+import config
 import database
 
 log = logging.getLogger(__name__)
@@ -372,6 +373,22 @@ async def _send_log(
         log.exception("Could not write ticket log in channel %s", channel.id)
 
 
+async def _can_manage_panel(interaction: discord.Interaction) -> bool:
+    guild = interaction.guild
+    member = interaction.user
+    if guild is None or not isinstance(member, discord.Member):
+        return False
+    if member.id == guild.owner_id or member.guild_permissions.administrator:
+        return True
+    if member.guild_permissions.manage_guild:
+        return True
+    ticket_config = database.get_ticket_config(guild.id)
+    admin_role_ids = set(ticket_config["admin_role_ids"])
+    if config.ADMIN_ROLE_ID:
+        admin_role_ids.add(config.ADMIN_ROLE_ID)
+    return any(role.id in admin_role_ids for role in member.roles)
+
+
 class Tickets(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -387,7 +404,7 @@ class Tickets(commands.Cog):
             config = database.get_ticket_config(guild.id)
             await self._sync_guild_panel(guild, config)
 
-    async def _sync_guild_panel(self, guild: discord.Guild, config: dict) -> None:
+    async def _sync_guild_panel(self, guild: discord.Guild, config: dict) -> bool:
         channel_id = config.get("panel_channel_id")
         message_id = config.get("panel_message_id")
         categories = config.get("categories", [])
@@ -400,13 +417,13 @@ class Tickets(commands.Cog):
             ),
         )
         if self._synced_panel_state.get(guild.id) == state:
-            return
+            return True
         if not channel_id:
-            return
+            return False
         channel = guild.get_channel(int(channel_id))
         if not isinstance(channel, discord.TextChannel):
             log.warning("Ticket panel channel %s is unavailable in guild %s", channel_id, guild.id)
-            return
+            return False
         message = None
         if message_id:
             try:
@@ -415,14 +432,14 @@ class Tickets(commands.Cog):
                 message = None
             except discord.HTTPException:
                 log.exception("Could not fetch ticket panel %s", message_id)
-                return
+                return False
         try:
             if not categories:
                 if message is not None:
                     await message.delete()
                 database.set_ticket_panel_message(guild.id, None)
                 self._synced_panel_state[guild.id] = state
-                return
+                return False
             view = _panel_view(categories)
             embed = _ticket_embed(categories)
             if message is None:
@@ -436,31 +453,49 @@ class Tickets(commands.Cog):
                 message.id,
                 state[2],
             )
+            return True
         except discord.HTTPException:
             log.exception("Could not update ticket panel for guild %s", guild.id)
+            return False
 
     @sync_ticket_panels.before_loop
     async def before_sync_ticket_panels(self):
         await self.bot.wait_until_ready()
 
-    @app_commands.command(name="ticket-panel", description="Refresh this server's configured ticket panel")
+    @app_commands.command(name="panel", description="Send or refresh the configured support ticket panel")
     @app_commands.guild_only()
-    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.check(_can_manage_panel)
     async def refresh_panel(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
-        if interaction.guild is not None:
-            self._synced_panel_state.pop(interaction.guild.id, None)
-            config = database.get_ticket_config(interaction.guild.id)
-            await self._sync_guild_panel(interaction.guild, config)
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.followup.send("Run this command in a server.", ephemeral=True)
+        ticket_config = database.get_ticket_config(guild.id)
+        if not ticket_config.get("panel_channel_id"):
+            return await interaction.followup.send(
+                "Set a panel channel in the management page first.", ephemeral=True
+            )
+        if not ticket_config.get("categories"):
+            return await interaction.followup.send(
+                "Add at least one ticket category in the management page first.", ephemeral=True
+            )
+        self._synced_panel_state.pop(guild.id, None)
+        synced = await self._sync_guild_panel(guild, ticket_config)
+        if not synced:
+            return await interaction.followup.send(
+                "I couldn't send the panel. Check that the configured channel exists and I can view and send messages there.",
+                ephemeral=True,
+            )
         await interaction.followup.send(
-            "Ticket panel sync requested. Check the configured panel channel.", ephemeral=True
+            f"Ticket panel sent or refreshed in <#{ticket_config['panel_channel_id']}>.",
+            ephemeral=True,
         )
 
     async def cog_app_command_error(
         self, interaction: discord.Interaction, error: app_commands.AppCommandError
     ):
-        if isinstance(error, app_commands.MissingPermissions):
-            message = "You need the Manage Server permission to refresh the ticket panel."
+        if isinstance(error, (app_commands.MissingPermissions, app_commands.CheckFailure)):
+            message = "Only the server owner, a server administrator, or a configured admin can use `/panel`."
             if interaction.response.is_done():
                 await interaction.followup.send(message, ephemeral=True)
             else:

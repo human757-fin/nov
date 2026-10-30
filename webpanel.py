@@ -206,6 +206,21 @@ def _dashboard_html(request: web.Request, guild_id: int | None, message: str = "
             suggestion_content = '<p class="empty">No suggestions for this server yet.</p>'
         content += f"""<section class="card wide"><div class="card-head"><div><h2>Feature suggestions</h2><p>Recent 100 submissions for server {selected}. Status changes here do not send Discord DMs.</p></div></div>{suggestion_content}</section>"""
 
+        ticket_config = database.get_ticket_config(selected)
+        category_lines = [
+            " | ".join((category.get("emoji") or "", category["name"], category["description"], str(category.get("parent_category_id") or "")))
+            for category in ticket_config["categories"]
+        ]
+        category_text = "\n".join(category_lines)
+        admin_roles = ", ".join(str(role_id) for role_id in ticket_config["admin_role_ids"])
+        content += f"""<section class="card wide"><div class="card-head"><div><h2>Support tickets</h2><p>Configure the Discord ticket panel, staff roles, and ticket categories for server {selected}.</p></div></div>
+<form method="post" action="/tickets/settings"><input type="hidden" name="csrf" value="{_escape(csrf)}"><input type="hidden" name="guild_id" value="{selected}">
+<div class="inline"><label>Panel channel ID<input name="panel_channel_id" type="number" min="1" value="{_escape(ticket_config['panel_channel_id'] or '')}" placeholder="Discord text channel ID"></label><label>Log channel ID<input name="log_channel_id" type="number" min="1" value="{_escape(ticket_config['log_channel_id'] or '')}" placeholder="Discord text channel ID"></label></div>
+<label>Admin role IDs<input name="admin_role_ids" value="{_escape(admin_roles)}" placeholder="Comma-separated role IDs"></label>
+<label>Categories<textarea name="categories" maxlength="10000" placeholder="🎫 | General Support | Ask us anything |\n🛠️ | Technical Help | Get help with a technical issue | 123456789012345678">{_escape(category_text)}</textarea></label>
+<p class="hint">One category per line: emoji | title | description | optional Discord category channel ID. Leave the emoji or final channel ID blank if unused. Up to 25 categories.</p>
+<button type="submit">Save ticket settings</button></form></section>"""
+
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Nov Bot · Management</title><style>{_CSS}</style></head>
 <body><main><header class="top"><div><div class="brand"><span class="mark">N</span><div><b>Nov Bot</b><small>Management panel</small></div></div><h1>Dashboard</h1><p class="muted">Welcome settings and community suggestions</p></div>
 <form class="logout" method="post" action="/logout"><input type="hidden" name="csrf" value="{_escape(csrf)}"><button class="secondary" type="submit">Sign out</button></form></header>
@@ -275,6 +290,8 @@ async def dashboard(request: web.Request) -> web.Response:
         message = "Welcome settings saved."
     elif request.query.get("saved") == "suggestion":
         message = "Suggestion status updated."
+    elif request.query.get("saved") == "tickets":
+        message = "Ticket settings saved. The Discord panel will update shortly."
     return web.Response(
         text=_dashboard_html(request, guild_id, message), content_type="text/html"
     )
@@ -336,6 +353,77 @@ async def update_suggestion(request: web.Request) -> web.Response:
     raise web.HTTPSeeOther(f"/?{urlencode({'guild_id': guild_id, 'saved': 'suggestion'})}")
 
 
+async def save_ticket_settings(request: web.Request) -> web.Response:
+    form = await request.post()
+    _check_csrf(request, form)
+    try:
+        guild_id = int(form.get("guild_id", ""))
+        if not 0 < guild_id <= 2**63 - 1:
+            raise ValueError
+    except ValueError:
+        raise web.HTTPBadRequest(text="Invalid server ID.")
+
+    def parse_optional_id(value: object, label: str) -> int | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            parsed = int(raw)
+        except ValueError as error:
+            raise web.HTTPBadRequest(text=f"{label} must be a positive Discord ID.") from error
+        if not 0 < parsed <= 2**63 - 1:
+            raise web.HTTPBadRequest(text=f"{label} must be a positive Discord ID.")
+        return parsed
+
+    panel_channel_id = parse_optional_id(form.get("panel_channel_id"), "Panel channel")
+    log_channel_id = parse_optional_id(form.get("log_channel_id"), "Log channel")
+    role_text = str(form.get("admin_role_ids", ""))
+    admin_role_ids = []
+    for raw_role_id in (part.strip() for part in role_text.split(",")):
+        if not raw_role_id:
+            continue
+        role_id = parse_optional_id(raw_role_id, "Admin role")
+        if role_id not in admin_role_ids:
+            admin_role_ids.append(role_id)
+    if len(admin_role_ids) > 25:
+        raise web.HTTPBadRequest(text="Configure no more than 25 admin roles.")
+
+    categories = []
+    for line_number, line in enumerate(str(form.get("categories", "")).splitlines(), 1):
+        if not line.strip():
+            continue
+        parts = [part.strip() for part in line.split("|", 3)]
+        if len(parts) < 3:
+            raise web.HTTPBadRequest(
+                text=f"Category line {line_number} needs emoji | title | description."
+            )
+        emoji, name, description = parts[:3]
+        parent_id = parse_optional_id(parts[3], f"Category line {line_number} parent channel") if len(parts) == 4 else None
+        if not name or len(name) > 100 or not description or len(description) > 100:
+            raise web.HTTPBadRequest(
+                text=f"Category line {line_number}: title and description must be 1–100 characters."
+            )
+        if len(emoji) > 64:
+            raise web.HTTPBadRequest(text=f"Category line {line_number}: emoji is too long.")
+        categories.append(
+            {
+                "emoji": emoji,
+                "name": name,
+                "description": description,
+                "parent_category_id": parent_id,
+            }
+        )
+        if len(categories) > 25:
+            raise web.HTTPBadRequest(text="Configure no more than 25 ticket categories.")
+
+    if categories and panel_channel_id is None:
+        raise web.HTTPBadRequest(text="Set a panel channel before enabling ticket categories.")
+    database.save_ticket_config(
+        guild_id, panel_channel_id, log_channel_id, admin_role_ids, categories
+    )
+    raise web.HTTPSeeOther(f"/?{urlencode({'guild_id': guild_id, 'saved': 'tickets'})}")
+
+
 async def logout(request: web.Request) -> web.Response:
     form = await request.post()
     _check_csrf(request, form)
@@ -359,6 +447,7 @@ def create_app() -> web.Application:
             web.get("/", dashboard),
             web.post("/settings", save_settings),
             web.post("/suggestions/status", update_suggestion),
+            web.post("/tickets/settings", save_ticket_settings),
             web.post("/logout", logout),
         ]
     )

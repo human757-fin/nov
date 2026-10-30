@@ -24,7 +24,7 @@ The panel and bot both use the configured database engine. `DB_ENGINE=sqlite` is
 
 `BOT_HEALTH_PORT` starts a separate `/healthz` endpoint in the bot process; it returns success only after Discord reports the bot ready. When `DEV_GUILD_ID` is set, startup clears server-scoped command copies in that server so they do not duplicate the bot's global commands. Global command changes may take time to appear; `!sync dev` can create temporary guild copies for fast testing, and `!sync clear` removes them. `LOG_LEVEL` sets console logging detail.
 
-The panel can edit welcome channel IDs, titles, messages, and colors, and review suggestion statuses and notes. Denying a suggestion from the panel updates its stored status and note but does not send the submitter a Discord DM; use `/suggestion-status` when a denial DM is needed.
+The panel can edit welcome channel IDs, titles, messages, and colors, review suggestion statuses and notes, and configure support tickets. Ticket settings include a public panel channel, a log channel, comma-separated admin role IDs, and one category per line in the form `emoji | title | description | optional Discord category channel ID`. The bot refreshes the configured ticket panel automatically. Ticket channels are private to their creator, configured admin roles, and the bot; close actions record the reason and closer in the log channel.
 
 If the panel is reachable over the internet, put it behind HTTPS. For an HTTPS reverse proxy, set `WEBUI_PUBLIC_ORIGIN` to the exact browser origin (for example, `https://bot.example.com`) and set `SECURE_WEB_COOKIE=1`. Do not send the management password over plain HTTP. The panel prints a warning when secure cookies are disabled.
 
@@ -45,6 +45,10 @@ When a member joins, the bot sends an embed to the configured channel. If no cha
 - `/welcome preview` — preview the current embed privately.
 
 Message and title text support `{mention}`, `{server}`, `{member_count}`, and `{username}` placeholders. For example: `/welcome message Welcome {mention} to {server}! You're member #{member_count}.`
+
+### Support tickets
+
+Configure the panel and log channel in the management panel. Add categories one per line using `emoji | title | description | optional Discord category channel ID`; the last field can place that ticket type under a Discord category. The bot posts or refreshes the ticket dropdown in the selected panel channel. Members can open one ticket at a time. Each ticket is private to the opener and configured admin roles, pings those roles and the opener, and has a close button with reasons. Closed tickets remain in their channel for staff review, and opening and closing events are sent to the configured log channel. The bot needs **Manage Channels**, **View Channel**, and **Send Messages** permissions in the panel, log, and ticket areas.
 
 ### Moderation
 
@@ -67,7 +71,7 @@ Moderators with the corresponding Discord permissions can use `/ban`, `/kick`, `
 ## Project layout
 
 - `bot.py` — bot startup, intents, SQLite initialization, and cog loading.
-- `database.py` — per-server settings storage.
+- `database.py` — per-server settings, ticket configuration, and ticket history storage.
 - `checks.py` — shared bot-admin permission check.
 - `config.py` — environment configuration.
-- `cogs/` — welcome, moderation, and utility commands.
+- `cogs/` — welcome, moderation, utility, suggestion, and support ticket features.

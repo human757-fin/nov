@@ -30,6 +30,10 @@ BUILT_IN_FEATURES = [
         "The bot posts a welcome embed when someone joins. Server admins can set its channel, text, title, and color with `/welcome`.",
     ),
     (
+        "Built-in · Support tickets",
+        "Members can open private support channels from the configured ticket panel. Ticket admins can close them with a reason, and ticket events are logged.",
+    ),
+    (
         "Built-in · Bot latency",
         "Use `/ping` or `!ping` to check the bot's response latency.",
     ),

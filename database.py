@@ -215,6 +215,83 @@ def initialize() -> None:
                     connection.execute(
                         f"ALTER TABLE feature_suggestions ADD COLUMN {column} {definition}"
                     )
+            if is_mysql:
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS ticket_settings (
+                        guild_id BIGINT NOT NULL PRIMARY KEY,
+                        panel_channel_id BIGINT NULL,
+                        panel_message_id BIGINT NULL,
+                        log_channel_id BIGINT NULL,
+                        admin_role_ids TEXT NULL
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
+                )
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS ticket_categories (
+                        guild_id BIGINT NOT NULL,
+                        category_key VARCHAR(32) NOT NULL,
+                        position INTEGER NOT NULL,
+                        name VARCHAR(100) NOT NULL,
+                        emoji VARCHAR(64) NULL,
+                        description VARCHAR(100) NOT NULL,
+                        parent_category_id BIGINT NULL,
+                        PRIMARY KEY (guild_id, category_key),
+                        INDEX ticket_categories_order (guild_id, position)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
+                )
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS tickets (
+                        id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                        guild_id BIGINT NOT NULL,
+                        channel_id BIGINT NULL,
+                        user_id BIGINT NOT NULL,
+                        category_key VARCHAR(32) NOT NULL,
+                        category_name VARCHAR(100) NOT NULL,
+                        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        status VARCHAR(16) NOT NULL DEFAULT 'provisioning',
+                        close_reason VARCHAR(100) NULL,
+                        closed_by BIGINT NULL,
+                        closed_at TIMESTAMP NULL,
+                        INDEX tickets_open_lookup (guild_id, user_id, status),
+                        INDEX tickets_channel_lookup (channel_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
+                )
+            else:
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS ticket_settings (
+                        guild_id INTEGER PRIMARY KEY,
+                        panel_channel_id INTEGER,
+                        panel_message_id INTEGER,
+                        log_channel_id INTEGER,
+                        admin_role_ids TEXT NOT NULL DEFAULT ''
+                    )"""
+                )
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS ticket_categories (
+                        guild_id INTEGER NOT NULL,
+                        category_key TEXT NOT NULL,
+                        position INTEGER NOT NULL,
+                        name TEXT NOT NULL,
+                        emoji TEXT,
+                        description TEXT NOT NULL,
+                        parent_category_id INTEGER,
+                        PRIMARY KEY (guild_id, category_key)
+                    )"""
+                )
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS tickets (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        guild_id INTEGER NOT NULL,
+                        channel_id INTEGER,
+                        user_id INTEGER NOT NULL,
+                        category_key TEXT NOT NULL,
+                        category_name TEXT NOT NULL,
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        status TEXT NOT NULL DEFAULT 'provisioning',
+                        close_reason TEXT,
+                        closed_by INTEGER,
+                        closed_at TEXT
+                    )"""
+                )
         finally:
             if is_mysql:
                 connection.execute("SELECT RELEASE_LOCK(?)", (lock_name,)).fetchone()
@@ -271,6 +348,7 @@ def get_dashboard_guild_ids() -> list[int]:
         rows = connection.execute(
             """SELECT guild_id FROM guild_settings
             UNION SELECT guild_id FROM feature_suggestions
+            UNION SELECT guild_id FROM ticket_settings
             ORDER BY guild_id"""
         ).fetchall()
     return [row["guild_id"] for row in rows]
@@ -417,4 +495,145 @@ def set_suggestion_status(
     result["previous_status"] = previous_status
     result["status"] = status
     result["status_note"] = note
+    return result
+
+
+def get_ticket_config(guild_id: int) -> dict:
+    with closing(_connect()) as connection, connection:
+        row = connection.execute(
+            "SELECT * FROM ticket_settings WHERE guild_id = ?", (guild_id,)
+        ).fetchone()
+        categories = connection.execute(
+            """SELECT category_key, position, name, emoji, description, parent_category_id
+            FROM ticket_categories WHERE guild_id = ? ORDER BY position""",
+            (guild_id,),
+        ).fetchall()
+    result = {
+        "guild_id": guild_id,
+        "panel_channel_id": None,
+        "panel_message_id": None,
+        "log_channel_id": None,
+        "admin_role_ids": [],
+        "categories": [dict(category) for category in categories],
+    }
+    if row:
+        saved = dict(row)
+        result.update(saved)
+        result["admin_role_ids"] = [
+            int(role_id)
+            for role_id in (saved.get("admin_role_ids") or "").split(",")
+            if role_id.isdigit()
+        ]
+    return result
+
+
+def get_all_ticket_configs() -> list[dict]:
+    with closing(_connect()) as connection, connection:
+        rows = connection.execute(
+            "SELECT guild_id FROM ticket_settings ORDER BY guild_id"
+        ).fetchall()
+    return [get_ticket_config(int(row["guild_id"])) for row in rows]
+
+
+def save_ticket_config(
+    guild_id: int,
+    panel_channel_id: int | None,
+    log_channel_id: int | None,
+    admin_role_ids: list[int],
+    categories: list[dict],
+) -> None:
+    roles_value = ",".join(str(role_id) for role_id in admin_role_ids)
+    with closing(_connect()) as connection, connection:
+        insert_statement = (
+            "INSERT IGNORE INTO ticket_settings (guild_id) VALUES (?)"
+            if connection.engine == "mysql"
+            else "INSERT OR IGNORE INTO ticket_settings (guild_id) VALUES (?)"
+        )
+        connection.execute(insert_statement, (guild_id,))
+        connection.execute(
+            """UPDATE ticket_settings SET panel_channel_id = ?, log_channel_id = ?,
+            admin_role_ids = ? WHERE guild_id = ?""",
+            (panel_channel_id, log_channel_id, roles_value, guild_id),
+        )
+        connection.execute("DELETE FROM ticket_categories WHERE guild_id = ?", (guild_id,))
+        for position, category in enumerate(categories):
+            connection.execute(
+                """INSERT INTO ticket_categories
+                (guild_id, category_key, position, name, emoji, description, parent_category_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    guild_id,
+                    str(position),
+                    position,
+                    category["name"],
+                    category["emoji"] or None,
+                    category["description"],
+                    category["parent_category_id"],
+                ),
+            )
+
+
+def set_ticket_panel_message(guild_id: int, message_id: int | None) -> None:
+    with closing(_connect()) as connection, connection:
+        connection.execute(
+            "UPDATE ticket_settings SET panel_message_id = ? WHERE guild_id = ?",
+            (message_id, guild_id),
+        )
+
+
+def get_open_ticket(guild_id: int, user_id: int) -> dict | None:
+    with closing(_connect()) as connection, connection:
+        row = connection.execute(
+            """SELECT * FROM tickets WHERE guild_id = ? AND user_id = ?
+            AND status IN ('provisioning', 'open') ORDER BY id DESC LIMIT 1""",
+            (guild_id, user_id),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def create_ticket(guild_id: int, user_id: int, category_key: str, category_name: str) -> int:
+    with closing(_connect()) as connection, connection:
+        cursor = connection.execute(
+            """INSERT INTO tickets (guild_id, user_id, category_key, category_name)
+            VALUES (?, ?, ?, ?)""",
+            (guild_id, user_id, category_key, category_name),
+        )
+        return int(cursor.lastrowid)
+
+
+def set_ticket_channel(ticket_id: int, channel_id: int) -> None:
+    with closing(_connect()) as connection, connection:
+        connection.execute(
+            "UPDATE tickets SET channel_id = ?, status = 'open' WHERE id = ?",
+            (channel_id, ticket_id),
+        )
+
+
+def delete_ticket(ticket_id: int) -> None:
+    with closing(_connect()) as connection, connection:
+        connection.execute("DELETE FROM tickets WHERE id = ?", (ticket_id,))
+
+
+def get_ticket_by_channel(channel_id: int) -> dict | None:
+    with closing(_connect()) as connection, connection:
+        row = connection.execute(
+            "SELECT * FROM tickets WHERE channel_id = ?", (channel_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def close_ticket(ticket_id: int, closed_by: int, reason: str) -> dict | None:
+    with closing(_connect()) as connection, connection:
+        row = connection.execute(
+            "SELECT * FROM tickets WHERE id = ? AND status = 'open'", (ticket_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        connection.execute(
+            """UPDATE tickets SET status = 'closed', close_reason = ?,
+            closed_by = ?, closed_at = CURRENT_TIMESTAMP WHERE id = ?""",
+            (reason, closed_by, ticket_id),
+        )
+    result = dict(row)
+    result.update({"status": "closed", "close_reason": reason, "closed_by": closed_by})
     return result

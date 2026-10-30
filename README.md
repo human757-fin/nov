@@ -22,7 +22,7 @@ A small, multi-purpose Discord bot for our server. It uses Python 3.12+, `discor
 
 The panel and bot both use the configured database engine. `DB_ENGINE=sqlite` is the default. For MySQL or MariaDB, use `DB_ENGINE=mysql` and provide `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USERNAME`, and `DB_PASSWORD`; optional TLS is enabled by `DB_TLS=1` and verifies the server certificate. `DB_TLS_CA` can point to a custom CA certificate. The MySQL driver is included in `requirements.txt` and the project dependencies.
 
-`BOT_HEALTH_PORT` starts a separate `/healthz` endpoint in the bot process; it returns success only after Discord reports the bot ready. When `DEV_GUILD_ID` is set, startup clears server-scoped command copies in that server so they do not duplicate the bot's global commands. Global command changes may take time to appear; `!sync dev` can create temporary guild copies for fast testing, and `!sync clear` removes them. `LOG_LEVEL` sets console logging detail.
+`BOT_HEALTH_PORT` starts a separate `/healthz` endpoint in the bot process; it returns success only after Discord reports the bot ready. When `DEV_GUILD_ID` is set, startup clears server-scoped command copies in that server so they do not duplicate the bot's global commands. Global command changes may take time to appear; `<prefix>sync dev` can create temporary guild copies for fast testing, and `<prefix>sync clear` removes them. `LOG_LEVEL` sets console logging detail.
 
 The panel can edit welcome channel IDs, titles, messages, and colors, review suggestion statuses and notes, and configure support tickets. Ticket settings include a public panel channel, a log channel, comma-separated admin role IDs, and one category per line in the form `emoji | title | description | optional Discord category channel ID`. The bot refreshes the configured ticket panel automatically. Ticket channels are private to their creator, configured admin roles, and the bot; close actions record the reason and closer in the log channel.
 
@@ -56,9 +56,9 @@ Moderators with the corresponding Discord permissions can use `/ban`, `/kick`, `
 
 ### Utilities
 
-- `!ping` and `/ping` show the bot's latency.
-- `!prefix` shows this server's prefix. The server owner, a Discord administrator, or a member with the configured admin role can change it with `!prefix set ?`. Prefixes are per-server, allow 1–5 printable characters without spaces, and default to `!`.
-- `!sync dev` copies the current application commands to this server for fast testing. It can show duplicate entries while global commands also exist. Use `!sync clear` to remove this server's copies when testing is done; global commands remain available. `!sync global` publishes the current application commands globally and may take up to an hour to appear. Bare `!sync` is an alias for `!sync clear`. Only the server owner, Discord administrators, and configured admin role can use sync commands.
+- `<prefix>ping` and `/ping` show the bot's latency.
+- `<prefix>prefix` shows this server's prefix. The server owner, a Discord administrator, or a member with the configured admin role can change it with `<current prefix>prefix set <new prefix>`. Prefixes are per-server, allow 1–5 printable characters without spaces, and default to `!`.
+- `<prefix>sync dev` copies the current application commands to this server for fast testing. It can show duplicate entries while global commands also exist. Use `<prefix>sync clear` to remove this server's copies when testing is done; global commands remain available. `<prefix>sync global` publishes the current application commands globally and may take up to an hour to appear. Bare `<prefix>sync` is an alias for `<prefix>sync clear`. Only the server owner, Discord administrators, and configured admin role can use sync commands.
 
 ### Feature suggestions
 

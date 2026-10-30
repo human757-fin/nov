@@ -35,7 +35,7 @@ BUILT_IN_FEATURES = [
     ),
     (
         "Built-in · Bot latency",
-        "Use `/ping` or `!ping` to check the bot's response latency.",
+        "Use `/ping` or `{prefix}ping` to check the bot's response latency.",
     ),
     (
         "Built-in · Feature suggestions",
@@ -151,7 +151,12 @@ class Suggestions(commands.Cog):
         page: app_commands.Range[int, 1, 10000] = 1,
     ):
         guild_id = interaction.guild_id
-        total = len(BUILT_IN_FEATURES) + database.count_public_features(guild_id)
+        prefix = database.get_command_prefix(guild_id)
+        built_in_features = [
+            (title, description.format(prefix=prefix))
+            for title, description in BUILT_IN_FEATURES
+        ]
+        total = len(built_in_features) + database.count_public_features(guild_id)
         page_count = max(1, (total + SUGGESTIONS_PER_PAGE - 1) // SUGGESTIONS_PER_PAGE)
         if page > page_count:
             return await interaction.response.send_message(
@@ -160,9 +165,9 @@ class Suggestions(commands.Cog):
             )
 
         offset = (page - 1) * SUGGESTIONS_PER_PAGE
-        page_items = BUILT_IN_FEATURES[offset : offset + SUGGESTIONS_PER_PAGE]
-        if offset + SUGGESTIONS_PER_PAGE > len(BUILT_IN_FEATURES):
-            dynamic_offset = max(0, offset - len(BUILT_IN_FEATURES))
+        page_items = built_in_features[offset : offset + SUGGESTIONS_PER_PAGE]
+        if offset + SUGGESTIONS_PER_PAGE > len(built_in_features):
+            dynamic_offset = max(0, offset - len(built_in_features))
             dynamic_limit = SUGGESTIONS_PER_PAGE - len(page_items)
             features = database.get_public_features(
                 guild_id, dynamic_limit, dynamic_offset

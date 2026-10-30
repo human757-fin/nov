@@ -12,7 +12,7 @@ class Utils(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    # Works as both /ping and !ping
+    # Works as both /ping and the server's configured prefix command.
     @commands.hybrid_command(name="ping", description="Check the bot's latency")
     async def ping(self, ctx: commands.Context):
         latency = round(self.bot.latency * 1000)
@@ -54,7 +54,7 @@ class Utils(commands.Cog):
         else:
             raise error
 
-    # Prefix-only, admin-only: !sync
+    # Prefix-only, admin-only: <prefix>sync
     @commands.command(name="sync")
     @is_bot_admin()
     async def sync(
@@ -63,10 +63,9 @@ class Utils(commands.Cog):
         scope: Optional[Literal["dev", "global", "clear"]] = "clear",  # noqa: UP045
     ):
         """
-        !sync          -> clear this server's command copies
-        !sync dev      -> sync commands to this server for fast testing
-        !sync global   -> sync to all servers (can take up to an hour to appear)
-        !sync clear    -> remove this server's copy of commands
+        The server's current prefix followed by "sync" clears this server's command copies.
+        Add "dev" to sync commands here for fast testing, "global" to publish globally,
+        or "clear" to remove this server's copies.
         """
         if scope == "global":
             synced = await self.bot.tree.sync()
@@ -80,7 +79,7 @@ class Utils(commands.Cog):
             synced = await self.bot.tree.sync(guild=ctx.guild)
             await ctx.send(
                 f"Synced {len(synced)} commands to this dev server. "
-                "Use `!sync clear` when you're done testing."
+                f"Use `{ctx.clean_prefix}sync clear` when you're done testing."
             )
 
         else:  # clear, also the default

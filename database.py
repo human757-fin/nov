@@ -2,6 +2,7 @@
 
 import sqlite3
 import ssl
+import time
 from contextlib import closing
 from functools import lru_cache
 from pathlib import Path
@@ -251,6 +252,7 @@ def initialize() -> None:
                         close_reason VARCHAR(100) NULL,
                         closed_by BIGINT NULL,
                         closed_at TIMESTAMP NULL,
+                        delete_after BIGINT NULL,
                         INDEX tickets_open_lookup (guild_id, user_id, status),
                         INDEX tickets_channel_lookup (channel_id)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
@@ -289,8 +291,30 @@ def initialize() -> None:
                         status TEXT NOT NULL DEFAULT 'provisioning',
                         close_reason TEXT,
                         closed_by INTEGER,
-                        closed_at TEXT
+                        closed_at TEXT,
+                        delete_after INTEGER
                     )"""
+                )
+            if is_mysql:
+                ticket_columns = {
+                    row["Field"]
+                    for row in connection.execute("SHOW COLUMNS FROM tickets").fetchall()
+                }
+                if "delete_after" not in ticket_columns:
+                    connection.execute("ALTER TABLE tickets ADD COLUMN delete_after BIGINT NULL")
+                connection.execute(
+                    """UPDATE tickets SET delete_after = UNIX_TIMESTAMP(closed_at) + 300
+                    WHERE status = 'closed' AND delete_after IS NULL AND closed_at IS NOT NULL"""
+                )
+            else:
+                ticket_columns = {
+                    row["name"] for row in connection.execute("PRAGMA table_info(tickets)")
+                }
+                if "delete_after" not in ticket_columns:
+                    connection.execute("ALTER TABLE tickets ADD COLUMN delete_after INTEGER")
+                connection.execute(
+                    """UPDATE tickets SET delete_after = CAST(strftime('%s', closed_at) AS INTEGER) + 300
+                    WHERE status = 'closed' AND delete_after IS NULL AND closed_at IS NOT NULL"""
                 )
         finally:
             if is_mysql:
@@ -623,6 +647,7 @@ def get_ticket_by_channel(channel_id: int) -> dict | None:
 
 
 def close_ticket(ticket_id: int, closed_by: int, reason: str) -> dict | None:
+    delete_after = int(time.time()) + 300
     with closing(_connect()) as connection, connection:
         row = connection.execute(
             "SELECT * FROM tickets WHERE id = ? AND status = 'open'", (ticket_id,)
@@ -631,9 +656,68 @@ def close_ticket(ticket_id: int, closed_by: int, reason: str) -> dict | None:
             return None
         connection.execute(
             """UPDATE tickets SET status = 'closed', close_reason = ?,
-            closed_by = ?, closed_at = CURRENT_TIMESTAMP WHERE id = ?""",
-            (reason, closed_by, ticket_id),
+            closed_by = ?, closed_at = CURRENT_TIMESTAMP, delete_after = ? WHERE id = ?""",
+            (reason, closed_by, delete_after, ticket_id),
         )
     result = dict(row)
-    result.update({"status": "closed", "close_reason": reason, "closed_by": closed_by})
+    result.update(
+        {
+            "status": "closed",
+            "close_reason": reason,
+            "closed_by": closed_by,
+            "delete_after": delete_after,
+        }
+    )
     return result
+
+
+def reopen_ticket(ticket_id: int, reopened_by: int) -> dict | None:
+    now = int(time.time())
+    with closing(_connect()) as connection, connection:
+        row = connection.execute(
+            """SELECT * FROM tickets WHERE id = ? AND status = 'closed'
+            AND delete_after > ?""",
+            (ticket_id, now),
+        ).fetchone()
+        if row is None:
+            return None
+        cursor = connection.execute(
+            """UPDATE tickets SET status = 'open', close_reason = NULL,
+            closed_by = NULL, closed_at = NULL, delete_after = NULL
+            WHERE id = ? AND status = 'closed' AND delete_after > ?""",
+            (ticket_id, now),
+        )
+        if cursor.rowcount != 1:
+            return None
+    result = dict(row)
+    result.update({"status": "open", "reopened_by": reopened_by})
+    return result
+
+
+def get_expired_tickets(now: int, limit: int = 100) -> list[dict]:
+    with closing(_connect()) as connection, connection:
+        rows = connection.execute(
+            """SELECT * FROM tickets WHERE status IN ('closed', 'deleting') AND delete_after <= ?
+            ORDER BY delete_after, id LIMIT ?""",
+            (now, limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def claim_ticket_deletion(ticket_id: int, now: int) -> bool:
+    with closing(_connect()) as connection, connection:
+        cursor = connection.execute(
+            """UPDATE tickets SET status = 'deleting'
+            WHERE id = ? AND status = 'closed' AND delete_after <= ?""",
+            (ticket_id, now),
+        )
+        return cursor.rowcount == 1
+
+
+def retry_ticket_deletion(ticket_id: int, delete_after: int) -> None:
+    with closing(_connect()) as connection, connection:
+        connection.execute(
+            """UPDATE tickets SET status = 'closed', delete_after = ?
+            WHERE id = ? AND status = 'deleting'""",
+            (delete_after, ticket_id),
+        )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 
 import discord
 from discord import app_commands
@@ -259,6 +260,87 @@ class TicketControlsView(discord.ui.View):
             ephemeral=True,
         )
 
+    @discord.ui.button(
+        label="Reopen ticket",
+        style=discord.ButtonStyle.success,
+        emoji="🔓",
+        custom_id="nov:tickets:reopen",
+    )
+    async def reopen_ticket_button(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ):
+        ticket = database.get_ticket_by_channel(interaction.channel_id)
+        if ticket is None or ticket["status"] != "closed":
+            return await interaction.response.send_message(
+                "This ticket isn't closed.", ephemeral=True
+            )
+        if not _can_close(interaction, ticket):
+            return await interaction.response.send_message(
+                "Only the ticket creator, a configured ticket admin, or a channel manager can reopen this ticket.",
+                ephemeral=True,
+            )
+        guild = interaction.guild
+        channel = interaction.channel
+        if guild is None or not isinstance(channel, discord.TextChannel):
+            return await interaction.response.send_message(
+                "Ticket channel is unavailable.", ephemeral=True
+            )
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        reopened = database.reopen_ticket(int(ticket["id"]), interaction.user.id)
+        if reopened is None:
+            return await interaction.followup.send(
+                "This ticket can no longer be reopened.", ephemeral=True
+            )
+        creator = guild.get_member(int(ticket["user_id"])) or discord.Object(
+            id=int(ticket["user_id"])
+        )
+        try:
+            await channel.set_permissions(
+                creator,
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+                attach_files=True,
+                embed_links=True,
+                reason=f"Ticket reopened by {interaction.user}",
+            )
+            if channel.name.startswith("closed-"):
+                await channel.edit(
+                    name=channel.name.removeprefix("closed-"),
+                    reason=f"Ticket reopened by {interaction.user}",
+                )
+        except discord.HTTPException:
+            log.exception("Could not restore access to ticket channel %s", channel.id)
+            database.close_ticket(int(ticket["id"]), interaction.user.id, "Reopen failed")
+            return await interaction.followup.send(
+                "I couldn't reopen this ticket. Check my channel permissions and try again.",
+                ephemeral=True,
+            )
+
+        try:
+            await channel.send(
+                f"🔓 Ticket reopened by {interaction.user.mention}.",
+                allowed_mentions=discord.AllowedMentions(users=[interaction.user]),
+            )
+        except discord.HTTPException:
+            log.exception("Could not post ticket reopen notice in channel %s", channel.id)
+        config = database.get_ticket_config(guild.id)
+        await _send_log(
+            guild,
+            config,
+            title=f"Ticket #{ticket['id']} reopened",
+            description=(
+                f"Channel: {channel.mention}\n"
+                f"Reopened by: {interaction.user.mention} (`{interaction.user.id}`)\n"
+                f"Category: {ticket['category_name']}"
+            ),
+            color=0x64D7B0,
+        )
+        await interaction.followup.send(
+            "Ticket reopened. The deletion timer has been cancelled.", ephemeral=True
+        )
+
 
 def _can_close(interaction: discord.Interaction, ticket: dict) -> bool:
     if interaction.user.id == int(ticket["user_id"]):
@@ -293,6 +375,8 @@ class CloseReasonSelect(discord.ui.Select):
         ticket = database.get_ticket_by_channel(interaction.channel_id)
         if ticket is None or int(ticket["id"]) != self.ticket_id:
             return await interaction.followup.send("Ticket record not found.", ephemeral=True)
+        if ticket["status"] != "open":
+            return await interaction.followup.send("This ticket was already closed.", ephemeral=True)
         if not _can_close(interaction, ticket):
             return await interaction.followup.send("You can't close this ticket.", ephemeral=True)
         guild = interaction.guild
@@ -300,17 +384,19 @@ class CloseReasonSelect(discord.ui.Select):
         if guild is None or not isinstance(channel, discord.TextChannel):
             return await interaction.followup.send("Ticket channel is unavailable.", ephemeral=True)
 
-        creator = guild.get_member(int(ticket["user_id"]))
+        creator = guild.get_member(int(ticket["user_id"])) or discord.Object(
+            id=int(ticket["user_id"])
+        )
         try:
-            if creator is not None:
-                await channel.set_permissions(
-                    creator,
-                    view_channel=False,
-                    send_messages=False,
-                    reason=f"Ticket closed by {interaction.user} · {reason}",
-                )
+            await channel.set_permissions(
+                creator,
+                view_channel=True,
+                send_messages=False,
+                read_message_history=True,
+                reason=f"Ticket closed by {interaction.user} · {reason}",
+            )
             await channel.edit(
-                name=f"closed-{channel.name}"[:100],
+                name=(channel.name if channel.name.startswith("closed-") else f"closed-{channel.name}")[:100],
                 reason=f"Ticket closed by {interaction.user} · {reason}",
             )
         except discord.HTTPException:
@@ -324,7 +410,8 @@ class CloseReasonSelect(discord.ui.Select):
         if closed is None:
             return await interaction.followup.send("This ticket was already closed.", ephemeral=True)
         await channel.send(
-            f"🔒 Ticket closed by {interaction.user.mention}. Reason: **{reason}**.",
+            f"🔒 Ticket closed by {interaction.user.mention}. Reason: **{reason}**. "
+            "Use the Reopen ticket button within 5 minutes to keep it open.",
             allowed_mentions=discord.AllowedMentions(users=[interaction.user]),
         )
         config = database.get_ticket_config(guild.id)
@@ -394,9 +481,11 @@ class Tickets(commands.Cog):
         self.bot = bot
         self._synced_panel_state: dict[int, tuple] = {}
         self.sync_ticket_panels.start()
+        self.cleanup_closed_tickets.start()
 
     async def cog_unload(self):
         self.sync_ticket_panels.cancel()
+        self.cleanup_closed_tickets.cancel()
 
     @tasks.loop(seconds=60)
     async def sync_ticket_panels(self):
@@ -460,6 +549,59 @@ class Tickets(commands.Cog):
 
     @sync_ticket_panels.before_loop
     async def before_sync_ticket_panels(self):
+        await self.bot.wait_until_ready()
+
+    @tasks.loop(seconds=10)
+    async def cleanup_closed_tickets(self):
+        now = int(time.time())
+        for ticket in database.get_expired_tickets(now):
+            guild = self.bot.get_guild(int(ticket["guild_id"]))
+            if guild is None:
+                continue
+            if ticket["status"] == "closed" and not database.claim_ticket_deletion(
+                int(ticket["id"]), now
+            ):
+                continue
+
+            channel = guild.get_channel(int(ticket["channel_id"])) if ticket.get("channel_id") else None
+            if channel is None and ticket.get("channel_id"):
+                try:
+                    channel = await guild.fetch_channel(int(ticket["channel_id"]))
+                except discord.NotFound:
+                    channel = None
+                except discord.HTTPException:
+                    log.exception("Could not fetch expired ticket channel %s", ticket["channel_id"])
+                    database.retry_ticket_deletion(int(ticket["id"]), now + 60)
+                    continue
+
+            channel_name = getattr(channel, "name", f"ticket-{ticket['id']}")
+            if channel is not None:
+                try:
+                    await channel.delete(reason="Ticket was not reopened within five minutes")
+                except discord.NotFound:
+                    pass
+                except discord.HTTPException:
+                    log.exception("Could not delete expired ticket channel %s", channel.id)
+                    database.retry_ticket_deletion(int(ticket["id"]), now + 60)
+                    continue
+
+            database.delete_ticket(int(ticket["id"]))
+            await _send_log(
+                guild,
+                database.get_ticket_config(guild.id),
+                title=f"Ticket #{ticket['id']} deleted",
+                description=(
+                    f"Channel: #{channel_name} (`{ticket.get('channel_id') or 'unknown'}`)\n"
+                    f"Creator: <@{ticket['user_id']}> (`{ticket['user_id']}`)\n"
+                    f"Category: {ticket['category_name']}\n"
+                    f"Close reason: {ticket.get('close_reason') or 'Unknown'}\n"
+                    "Deleted automatically after the five-minute reopen window."
+                ),
+                color=0x68738A,
+            )
+
+    @cleanup_closed_tickets.before_loop
+    async def before_cleanup_closed_tickets(self):
         await self.bot.wait_until_ready()
 
     @app_commands.command(name="panel", description="Send or refresh the configured support ticket panel")

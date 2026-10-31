@@ -60,6 +60,10 @@ Message and title text support `{mention}`, `{server}`, `{member_count}`, and `{
 
 Configure the panel and log channel in the management panel. Add categories one per line using `emoji | title | description | optional Discord category channel ID`; the last field can place that ticket type under a Discord category. The bot posts or refreshes the ticket dropdown in the selected panel channel automatically; an owner, administrator, or configured admin can run `/panel` to send or refresh it immediately. Members can open one ticket at a time. Each ticket is private to the opener and configured admin roles, pings those roles and the opener, and has a close button with reasons. Closed tickets can be reopened for five minutes; otherwise the bot deletes the channel. Opening, closing, reopening, and automatic deletion are sent to the configured log channel. The bot needs **Manage Channels**, **View Channel**, **Send Messages**, and **Embed Links** permissions in the panel, log, and ticket areas.
 
+### Group calls
+
+`/groupcall create [name]` creates a private voice room for the caller. Right-click a server member and choose **Apps → Add to Group Call** to let them join. Use `/groupcall close` while connected to close the room; it is also deleted automatically after remaining empty for one minute. The bot needs **Manage Channels** permission. The application command and user context menu are published globally at startup, so new installs may take up to an hour to show them.
+
 ### Moderation
 
 Moderators with the corresponding Discord permissions can use `/ban`, `/kick`, `/unban`, `/timeout`, and `/untimeout`. Timeouts accept a duration from 1 minute up to 28 days. Commands check role hierarchy and provide a reason where applicable.
@@ -81,12 +85,12 @@ Moderators with the corresponding Discord permissions can use `/ban`, `/kick`, `
 - `/suggestions` privately lists suggestions and their statuses, newest first, eight per page. Add the `page` option to browse older suggestions. Only the server owner, Discord administrators, and configured admin role can review them.
 - `/mysuggestions` privately lists your own submissions and statuses.
 - `/suggestion-status` lets authorized reviewers mark a suggestion pending, approved, denied, or implemented. Setting a suggestion to denied sends its author a private DM, including an optional reviewer note. If the author has DMs disabled, the command reports that the notification could not be delivered.
-- `/features` publicly lists built-in user-facing capabilities and community suggestions marked approved or implemented. It covers moderation, welcome embeds, ping, and suggestions; admin-only maintenance commands are excluded.
+- `/features` publicly lists built-in user-facing capabilities and community suggestions marked approved or implemented. It covers moderation, welcome embeds, support tickets, group calls, ping, and suggestions; admin-only maintenance commands are excluded.
 
 ## Project layout
 
 - `bot.py` — bot startup, intents, SQLite initialization, and cog loading.
-- `database.py` — per-server settings, ticket configuration, and ticket history storage.
+- `database.py` — per-server settings, ticket configuration, and ticket and group call records.
 - `checks.py` — shared bot-admin permission check.
 - `config.py` — environment configuration.
-- `cogs/` — welcome, moderation, utility, suggestion, and support ticket features.
+- `cogs/` — welcome, moderation, utility, suggestion, support ticket, and group call features.

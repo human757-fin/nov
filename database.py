@@ -269,6 +269,15 @@ def initialize() -> None:
                         INDEX tickets_channel_lookup (channel_id)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
                 )
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS group_call_rooms (
+                        guild_id BIGINT NOT NULL,
+                        channel_id BIGINT NOT NULL PRIMARY KEY,
+                        owner_id BIGINT NOT NULL,
+                        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        INDEX group_call_owner_lookup (guild_id, owner_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
+                )
             else:
                 connection.execute(
                     """CREATE TABLE IF NOT EXISTS ticket_settings (
@@ -305,6 +314,14 @@ def initialize() -> None:
                         closed_by INTEGER,
                         closed_at TEXT,
                         delete_after INTEGER
+                    )"""
+                )
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS group_call_rooms (
+                        guild_id INTEGER NOT NULL,
+                        channel_id INTEGER NOT NULL PRIMARY KEY,
+                        owner_id INTEGER NOT NULL,
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                     )"""
                 )
             if is_mysql:
@@ -531,6 +548,42 @@ def get_user_suggestions(
             (guild_id, user_id, limit, offset),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def create_group_call_room(guild_id: int, channel_id: int, owner_id: int) -> None:
+    with closing(_connect()) as connection, connection:
+        connection.execute(
+            "INSERT INTO group_call_rooms (guild_id, channel_id, owner_id) VALUES (?, ?, ?)",
+            (guild_id, channel_id, owner_id),
+        )
+
+
+def get_group_call_room(guild_id: int, *, channel_id: int | None = None, owner_id: int | None = None) -> dict | None:
+    if channel_id is None and owner_id is None:
+        raise ValueError("Provide a channel_id or owner_id")
+    if channel_id is not None:
+        query = "SELECT * FROM group_call_rooms WHERE guild_id = ? AND channel_id = ?"
+        params = (guild_id, channel_id)
+    else:
+        query = "SELECT * FROM group_call_rooms WHERE guild_id = ? AND owner_id = ? ORDER BY created_at DESC LIMIT 1"
+        params = (guild_id, owner_id)
+    with closing(_connect()) as connection, connection:
+        row = connection.execute(query, params).fetchone()
+    return dict(row) if row else None
+
+
+def get_group_call_rooms(guild_id: int) -> list[dict]:
+    with closing(_connect()) as connection, connection:
+        rows = connection.execute(
+            "SELECT * FROM group_call_rooms WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def delete_group_call_room(channel_id: int) -> None:
+    with closing(_connect()) as connection, connection:
+        connection.execute("DELETE FROM group_call_rooms WHERE channel_id = ?", (channel_id,))
 
 
 def set_suggestion_status(

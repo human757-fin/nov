@@ -18,6 +18,52 @@ class Utils(commands.Cog):
         latency = round(self.bot.latency * 1000)
         await ctx.send(f"Pong! `{latency}ms`")
 
+    @commands.hybrid_command(name="userinfo", description="Show details about a server member")
+    @commands.guild_only()
+    async def userinfo(self, ctx: commands.Context, member: Optional[discord.Member] = None):
+        """Show useful account and server membership details."""
+        member = member or ctx.author
+        embed = discord.Embed(
+            title=f"Member information: {member.display_name}",
+            color=member.color if member.color.value else discord.Color.blurple(),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="Account", value=f"{member.mention}\nID: `{member.id}`", inline=False)
+        embed.add_field(name="Joined server", value=discord.utils.format_dt(member.joined_at, "R") if member.joined_at else "Unknown")
+        embed.add_field(name="Account created", value=discord.utils.format_dt(member.created_at, "R"))
+        roles = [role.mention for role in reversed(member.roles) if role != ctx.guild.default_role]
+        role_text = ", ".join(roles[:10]) or "No roles"
+        if len(roles) > 10:
+            role_text += f" and {len(roles) - 10} more"
+        embed.add_field(name=f"Roles ({len(roles)})", value=role_text, inline=False)
+        await ctx.send(embed=embed)
+
+    @commands.hybrid_command(name="serverinfo", description="Show details about this server")
+    @commands.guild_only()
+    async def serverinfo(self, ctx: commands.Context):
+        """Show server size, ownership, channels, and creation date."""
+        guild = ctx.guild
+        embed = discord.Embed(
+            title=guild.name,
+            color=discord.Color.blurple(),
+            timestamp=discord.utils.utcnow(),
+        )
+        if guild.icon:
+            embed.set_thumbnail(url=guild.icon.url)
+        embed.add_field(name="Owner", value=f"<@{guild.owner_id}>" if guild.owner_id else "Unknown")
+        embed.add_field(name="Members", value=f"{guild.member_count:,}")
+        embed.add_field(name="Created", value=discord.utils.format_dt(guild.created_at, "R"))
+        embed.add_field(
+            name="Channels",
+            value=f"Text: {len(guild.text_channels)} · Voice: {len(guild.voice_channels)} · Categories: {len(guild.categories)}",
+            inline=False,
+        )
+        embed.add_field(name="Roles", value=str(max(0, len(guild.roles) - 1)))
+        embed.add_field(name="Boosts", value=f"{guild.premium_subscription_count or 0} (level {guild.premium_tier})")
+        embed.set_footer(text=f"Server ID: {guild.id}")
+        await ctx.send(embed=embed)
+
     @commands.group(name="prefix", invoke_without_command=True)
     async def prefix(self, ctx: commands.Context):
         if ctx.guild is None:

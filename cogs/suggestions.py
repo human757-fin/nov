@@ -34,10 +34,6 @@ BUILT_IN_FEATURES = [
         "Members can open private support channels from the configured ticket panel. Ticket admins can close them with a reason, and ticket events are logged.",
     ),
     (
-        "Built-in · Group calls",
-        "Create a private voice room with `/groupcall create`, then right-click a member and choose **Apps → Add to Group Call**. Empty rooms are cleaned up automatically.",
-    ),
-    (
         "Built-in · Bot latency",
         "Use `/ping` or `{prefix}ping` to check the bot's response latency.",
     ),

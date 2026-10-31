@@ -106,6 +106,12 @@ def initialize() -> None:
         try:
             if is_mysql:
                 connection.execute(
+                    """CREATE TABLE IF NOT EXISTS guild_metadata (
+                        guild_id BIGINT NOT NULL PRIMARY KEY,
+                        guild_name VARCHAR(256) NOT NULL
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
+                )
+                connection.execute(
                     """CREATE TABLE IF NOT EXISTS guild_settings (
                         guild_id BIGINT NOT NULL PRIMARY KEY,
                         command_prefix VARCHAR(5) NOT NULL DEFAULT '!',
@@ -159,6 +165,12 @@ def initialize() -> None:
                     "status_updated_at": "TIMESTAMP NULL",
                 }
             else:
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS guild_metadata (
+                        guild_id INTEGER PRIMARY KEY,
+                        guild_name TEXT NOT NULL
+                    )"""
+                )
                 connection.execute(
                     """CREATE TABLE IF NOT EXISTS guild_settings (
                         guild_id INTEGER PRIMARY KEY,
@@ -376,6 +388,38 @@ def get_dashboard_guild_ids() -> list[int]:
             ORDER BY guild_id"""
         ).fetchall()
     return [row["guild_id"] for row in rows]
+
+
+def get_dashboard_guilds() -> list[dict]:
+    """Return saved servers with known Discord names for the web panel selector."""
+    with closing(_connect()) as connection, connection:
+        rows = connection.execute(
+            """SELECT saved.guild_id, metadata.guild_name
+            FROM (
+                SELECT guild_id FROM guild_settings
+                UNION SELECT guild_id FROM feature_suggestions
+                UNION SELECT guild_id FROM ticket_settings
+                UNION SELECT guild_id FROM guild_metadata
+            ) AS saved
+            LEFT JOIN guild_metadata AS metadata ON metadata.guild_id = saved.guild_id
+            ORDER BY COALESCE(metadata.guild_name, ''), saved.guild_id"""
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def update_guild_metadata(guild_id: int, guild_name: str) -> None:
+    name = guild_name.strip()[:256] or f"Server {guild_id}"
+    insert_statement = (
+        "INSERT IGNORE INTO guild_metadata (guild_id, guild_name) VALUES (?, ?)"
+        if config.DATABASE_ENGINE in {"mysql", "mariadb"}
+        else "INSERT OR IGNORE INTO guild_metadata (guild_id, guild_name) VALUES (?, ?)"
+    )
+    with closing(_connect()) as connection, connection:
+        connection.execute(insert_statement, (guild_id, name))
+        connection.execute(
+            "UPDATE guild_metadata SET guild_name = ? WHERE guild_id = ?",
+            (name, guild_id),
+        )
 
 
 def get_dashboard_suggestions(guild_id: int, limit: int = 100) -> list[dict]:

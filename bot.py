@@ -23,6 +23,19 @@ class Catgirl(commands.Bot):
         super().__init__(*args, **kwargs)
         self.health_runner: web.AppRunner | None = None
 
+    async def _save_guild_names(self):
+        for guild in self.guilds:
+            database.update_guild_metadata(guild.id, guild.name)
+
+    async def on_ready(self):
+        await self._save_guild_names()
+
+    async def on_guild_join(self, guild: discord.Guild):
+        database.update_guild_metadata(guild.id, guild.name)
+
+    async def on_guild_update(self, _before: discord.Guild, after: discord.Guild):
+        database.update_guild_metadata(after.id, after.name)
+
     async def setup_hook(self):
         database.initialize()
         cogs_dir = Path(__file__).parent / "cogs"

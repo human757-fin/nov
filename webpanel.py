@@ -20,6 +20,7 @@ import config
 import database
 
 COOKIE_NAME = "nov_web_session"
+LAST_GUILD_COOKIE = "nov_last_guild"
 AUTH_LOG = logging.getLogger("webpanel.auth")
 SESSION_TTL = 8 * 60 * 60
 # Keep signed sessions valid when Pterodactyl restarts only the panel process.
@@ -156,14 +157,19 @@ _CSS = """
 
 def _dashboard_html(request: web.Request, guild_id: int | None, message: str = "") -> str:
     csrf = request["csrf"]
-    guild_ids = database.get_dashboard_guild_ids()
+    guilds = database.get_dashboard_guilds()
+    guild_ids = [int(item["guild_id"]) for item in guilds]
     selected = guild_id if guild_id is not None else (guild_ids[0] if guild_ids else None)
     notice = f'<p class="success">{_escape(message)}</p>' if message else ""
 
     options = ['<option value="">Choose a saved server…</option>']
-    for item in guild_ids:
-        chosen = " selected" if item == selected else ""
-        options.append(f'<option value="{item}"{chosen}>{item}</option>')
+    for item in guilds:
+        guild_id = int(item["guild_id"])
+        guild_name = str(item.get("guild_name") or f"Server {guild_id}")
+        chosen = " selected" if guild_id == selected else ""
+        options.append(
+            f'<option value="{guild_id}"{chosen}>{_escape(guild_name)} · {guild_id}</option>'
+        )
     selector = "".join(options)
     server_picker = f"""<form class="inline" method="get" action="/">
 <label>Saved server<select name="guild_id">{selector}</select></label><button class="secondary" type="submit">Open</button></form>
@@ -279,6 +285,10 @@ async def login(request: web.Request) -> web.Response:
 
 async def dashboard(request: web.Request) -> web.Response:
     raw_guild_id = request.query.get("guild_id", "")
+    if not raw_guild_id:
+        remembered = request.cookies.get(LAST_GUILD_COOKIE, "")
+        if remembered.isdigit() and 0 < int(remembered) <= 2**63 - 1:
+            raise web.HTTPSeeOther(f"/?{urlencode({'guild_id': int(remembered)})}")
     try:
         guild_id = int(raw_guild_id) if raw_guild_id else None
         if guild_id is not None and not 0 < guild_id <= 2**63 - 1:
@@ -292,9 +302,20 @@ async def dashboard(request: web.Request) -> web.Response:
         message = "Suggestion status updated."
     elif request.query.get("saved") == "tickets":
         message = "Ticket settings saved. The Discord panel will update shortly."
-    return web.Response(
+    response = web.Response(
         text=_dashboard_html(request, guild_id, message), content_type="text/html"
     )
+    if guild_id is not None:
+        response.set_cookie(
+            LAST_GUILD_COOKIE,
+            str(guild_id),
+            max_age=365 * 24 * 60 * 60,
+            httponly=True,
+            secure=config.WEBUI_SECURE_COOKIE,
+            samesite="Lax",
+            path="/",
+        )
+    return response
 
 
 async def save_settings(request: web.Request) -> web.Response:

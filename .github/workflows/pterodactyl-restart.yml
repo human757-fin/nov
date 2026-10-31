@@ -1,0 +1,44 @@
+name: Restart Pterodactyl server
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pterodactyl-restart
+  cancel-in-progress: false
+
+jobs:
+  restart:
+    name: Restart bot server
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Send restart signal
+        env:
+          PTERODACTYL_URL: ${{ secrets.PTERODACTYL_URL }}
+          PTERODACTYL_SERVER_ID: ${{ secrets.PTERODACTYL_SERVER_ID }}
+          PTERODACTYL_API_KEY: ${{ secrets.PTERODACTYL_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$PTERODACTYL_URL" || -z "$PTERODACTYL_SERVER_ID" || -z "$PTERODACTYL_API_KEY" ]]; then
+            echo "Add PTERODACTYL_URL, PTERODACTYL_SERVER_ID, and PTERODACTYL_API_KEY as repository Actions secrets."
+            exit 1
+          fi
+
+          panel_url="${PTERODACTYL_URL%/}"
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            "$panel_url/api/client/servers/$PTERODACTYL_SERVER_ID/power" \
+            --header "Authorization: Bearer $PTERODACTYL_API_KEY" \
+            --header "Accept: application/json" \
+            --header "Content-Type: application/json" \
+            --data '{"signal":"restart"}'
+
+          echo "Pterodactyl accepted the restart request."

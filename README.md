@@ -30,6 +30,16 @@ If the panel is reachable over the internet, put it behind HTTPS. For an HTTPS r
 
 The Pterodactyl startup command can launch the panel with `python webpanel.py &` before starting the bot. The included `requirements.txt` ensures the panel's `aiohttp` dependency is installed by the supplied startup flow.
 
+### Restart Pterodactyl after pushes
+
+`.github/workflows/pterodactyl-restart.yml` sends a restart signal to the Pterodactyl Client API after each push to `main` and can also be run manually from GitHub Actions. Add these repository Actions secrets under **Settings → Secrets and variables → Actions**:
+
+- `PTERODACTYL_URL` — the base URL of the Pterodactyl panel (for example, `https://panel.example.com`), not the bot's allocated game server address.
+- `PTERODACTYL_SERVER_ID` — the server identifier shown in the panel's server URL.
+- `PTERODACTYL_API_KEY` — a Client API key with access to restart that server.
+
+The workflow calls `POST /api/client/servers/{server}/power` with the `restart` signal. The server's startup command should have `AUTO_UPDATE=1` enabled so it pulls the pushed commit during startup.
+
 With SQLite, the app creates `catgirl.sqlite3` next to `bot.py` on startup; keep it to preserve settings and do not commit it. With MySQL or MariaDB, the app stores data in the configured database instead.
 
 ## Core features

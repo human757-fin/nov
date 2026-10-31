@@ -64,6 +64,43 @@ class Utils(commands.Cog):
         embed.set_footer(text=f"Server ID: {guild.id}")
         await ctx.send(embed=embed)
 
+    @commands.hybrid_command(name="avatar", description="Show a user's profile picture")
+    async def avatar(self, ctx: commands.Context, user: Optional[discord.User] = None):
+        user = user or ctx.author
+        embed = discord.Embed(title=f"{user.display_name}'s avatar", color=discord.Color.blurple())
+        embed.set_image(url=user.display_avatar.url)
+        await ctx.send(embed=embed)
+
+    @commands.hybrid_command(name="roleinfo", description="Show details about a server role")
+    @commands.guild_only()
+    async def roleinfo(self, ctx: commands.Context, role: discord.Role):
+        embed = discord.Embed(title=f"Role information: {role.name}", color=role.color or discord.Color.blurple())
+        embed.add_field(name="Role ID", value=f"`{role.id}`")
+        embed.add_field(name="Members", value=str(len(role.members)))
+        embed.add_field(name="Created", value=discord.utils.format_dt(role.created_at, "R"))
+        embed.add_field(name="Mentionable", value="Yes" if role.mentionable else "No")
+        embed.add_field(name="Hoisted", value="Yes" if role.hoist else "No")
+        embed.add_field(name="Position", value=str(role.position))
+        await ctx.send(embed=embed)
+
+    @commands.hybrid_command(name="poll", description="Create a reaction poll (separate choices with |)")
+    @commands.guild_only()
+    async def poll(self, ctx: commands.Context, question: str, choices: str):
+        options = [choice.strip() for choice in choices.split("|") if choice.strip()]
+        if len(question) > 250 or not 2 <= len(options) <= 10 or any(len(choice) > 80 for choice in options):
+            return await ctx.send(
+                "Use a question up to 250 characters and 2–10 choices up to 80 characters each, separated by `|`.",
+                ephemeral=ctx.interaction is not None,
+            )
+        marks = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+        description = "\n".join(f"{marks[index]} {choice}" for index, choice in enumerate(options))
+        message = await ctx.send(
+            embed=discord.Embed(title=question, description=description, color=discord.Color.blurple()),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        for mark in marks[:len(options)]:
+            await message.add_reaction(mark)
+
     @commands.group(name="prefix", invoke_without_command=True)
     async def prefix(self, ctx: commands.Context):
         if ctx.guild is None:

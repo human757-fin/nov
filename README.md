@@ -69,6 +69,9 @@ Moderators with the corresponding Discord permissions can use `/ban`, `/kick`, `
 - `<prefix>ping` and `/ping` show the bot's latency.
 - `<prefix>userinfo [member]` and `/userinfo [member]` show account age, server join time, roles, and member ID. Leave the member blank to view yourself.
 - `<prefix>serverinfo` and `/serverinfo` show the server owner, member count, creation date, channel counts, roles, and boost level.
+- `<prefix>avatar [user]` and `/avatar [user]` show a profile picture at full size; omit the user to show your own.
+- `<prefix>roleinfo <role>` and `/roleinfo <role>` show the role's ID, member count, creation date, and display settings.
+- `/poll question choices` (also available as `<prefix>poll "question" choices`) creates a reaction poll. Separate 2–10 choices with `|`, for example `/poll question:"Pizza or sushi?" choices:"Pizza | Sushi | Both"`.
 - `<prefix>prefix` shows this server's prefix. The server owner, a Discord administrator, or a member with the configured admin role can change it with `<current prefix>prefix set <new prefix>`. Prefixes are per-server, allow 1–5 printable characters without spaces, and default to `!`.
 - `<prefix>sync dev` copies the current application commands to this server for fast testing. It can show duplicate entries while global commands also exist. Use `<prefix>sync clear` to remove this server's copies when testing is done; global commands remain available. `<prefix>sync global` publishes the current application commands globally and may take up to an hour to appear. Bare `<prefix>sync` is an alias for `<prefix>sync clear`. Only the server owner, Discord administrators, and configured admin role can use sync commands.
 

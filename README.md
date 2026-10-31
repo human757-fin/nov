@@ -1,6 +1,6 @@
-# CATGIRL BOT
+# NOV BOT
 
-A small, multi-purpose Discord bot for our server. It uses Python 3.12+, `discord.py`, and SQLite or MySQL/MariaDB.
+Nov Bot is a multi-purpose Discord bot for your server. It uses Python 3.12+, `discord.py`, and SQLite or MySQL/MariaDB.
 
 ## Setup
 
@@ -40,7 +40,7 @@ The Pterodactyl startup command can launch the panel with `python webpanel.py &`
 
 The workflow calls `POST /api/client/servers/{server}/power` with the `restart` signal. The server's startup command should have `AUTO_UPDATE=1` enabled so it pulls the pushed commit during startup.
 
-With SQLite, the app creates `catgirl.sqlite3` next to `bot.py` on startup; keep it to preserve settings and do not commit it. With MySQL or MariaDB, the app stores data in the configured database instead.
+With SQLite, the app creates its database file next to `bot.py` on startup; keep it to preserve settings and do not commit it. With MySQL or MariaDB, the app stores data in the configured database instead.
 
 ## Core features
 

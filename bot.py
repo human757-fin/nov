@@ -49,6 +49,12 @@ class Catgirl(commands.Bot):
             except Exception:  # noqa: BLE001
                 logging.exception("Failed to load %s", extension)
 
+        try:
+            synced = await self.tree.sync()
+            logging.info("Published %s global application commands", len(synced))
+        except Exception:  # noqa: BLE001
+            logging.exception("Failed to publish global application commands")
+
         if config.DEV_GUILD_ID:
             guild = discord.Object(id=config.DEV_GUILD_ID)
             # Global commands already appear in this server. Guild-scoped

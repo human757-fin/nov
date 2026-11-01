@@ -38,6 +38,10 @@ BUILT_IN_FEATURES = [
         "Use `/ping` or `{prefix}ping` to check the bot's response latency.",
     ),
     (
+        "Built-in · Voice XP",
+        "Earn voice attendance XP and video bonuses, check your progress with `/rank`, and compare scores with `/voice-leaderboard`.",
+    ),
+    (
         "Built-in · Feature suggestions",
         "Members can submit ideas with `/suggest` and check their review status with `/mysuggestions`.",
     ),

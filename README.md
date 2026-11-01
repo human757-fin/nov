@@ -60,6 +60,10 @@ Message and title text support `{mention}`, `{server}`, `{member_count}`, and `{
 
 Configure the panel and log channel in the management panel. Add categories one per line using `emoji | title | description | optional Discord category channel ID`; the last field can place that ticket type under a Discord category. The bot posts or refreshes the ticket dropdown in the selected panel channel automatically; an owner, administrator, or configured admin can run `/panel` to send or refresh it immediately. Members can open one ticket at a time. Each ticket is private to the opener and configured admin roles, pings those roles and the opener, and has a close button with reasons. Closed tickets can be reopened for five minutes; otherwise the bot deletes the channel. Opening, closing, reopening, and automatic deletion are sent to the configured log channel. The bot needs **Manage Channels**, **View Channel**, **Send Messages**, and **Embed Links** permissions in the panel, log, and ticket areas.
 
+### Voice XP
+
+Members earn 10 audio XP every five minutes while they are in a non-AFK voice channel with at least one other human member and are not deafened. Turning on a camera or screen share adds 5 video XP per interval. Bots and solo voice sessions do not earn XP. `/rank [member]` (or `<prefix>rank [member]`) shows XP, level, and progress; `/voice-leaderboard` (or `<prefix>voice-leaderboard`) lists the server's top ten. Levels require `100 × level²` total XP. Level-ups are announced in the server's system channel when the bot can send there. XP measures voice attendance and Discord's camera/screen-share status, not whether the member is actively speaking or the content of their audio.
+
 ### Moderation
 
 Moderators with the corresponding Discord permissions can use `/ban`, `/kick`, `/unban`, `/timeout`, and `/untimeout`. Timeouts accept a duration from 1 minute up to 28 days. Commands check role hierarchy and provide a reason where applicable.
@@ -81,7 +85,7 @@ Moderators with the corresponding Discord permissions can use `/ban`, `/kick`, `
 - `/suggestions` privately lists suggestions and their statuses, newest first, eight per page. Add the `page` option to browse older suggestions. Only the server owner, Discord administrators, and configured admin role can review them.
 - `/mysuggestions` privately lists your own submissions and statuses.
 - `/suggestion-status` lets authorized reviewers mark a suggestion pending, approved, denied, or implemented. Setting a suggestion to denied sends its author a private DM, including an optional reviewer note. If the author has DMs disabled, the command reports that the notification could not be delivered.
-- `/features` publicly lists built-in user-facing capabilities and community suggestions marked approved or implemented. It covers moderation, welcome embeds, ping, and suggestions; admin-only maintenance commands are excluded.
+- `/features` publicly lists built-in user-facing capabilities and community suggestions marked approved or implemented. It covers moderation, welcome embeds, voice XP, support tools, and suggestions; admin-only maintenance commands are excluded.
 
 ## Project layout
 

@@ -269,6 +269,16 @@ def initialize() -> None:
                         INDEX tickets_channel_lookup (channel_id)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
                 )
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS voice_xp (
+                        guild_id BIGINT NOT NULL,
+                        user_id BIGINT NOT NULL,
+                        audio_xp BIGINT NOT NULL DEFAULT 0,
+                        video_xp BIGINT NOT NULL DEFAULT 0,
+                        PRIMARY KEY (guild_id, user_id),
+                        INDEX voice_xp_leaderboard (guild_id, audio_xp, video_xp)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
+                )
             else:
                 connection.execute(
                     """CREATE TABLE IF NOT EXISTS ticket_settings (
@@ -305,6 +315,15 @@ def initialize() -> None:
                         closed_by INTEGER,
                         closed_at TEXT,
                         delete_after INTEGER
+                    )"""
+                )
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS voice_xp (
+                        guild_id INTEGER NOT NULL,
+                        user_id INTEGER NOT NULL,
+                        audio_xp INTEGER NOT NULL DEFAULT 0,
+                        video_xp INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY (guild_id, user_id)
                     )"""
                 )
             if is_mysql:
@@ -531,6 +550,77 @@ def get_user_suggestions(
             (guild_id, user_id, limit, offset),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def award_voice_xp(
+    guild_id: int, user_id: int, *, audio: int, video: int
+) -> dict:
+    """Add voice XP and return the member's updated totals and level."""
+    with closing(_connect()) as connection, connection:
+        insert_statement = (
+            "INSERT IGNORE INTO voice_xp (guild_id, user_id) VALUES (?, ?)"
+            if connection.engine == "mysql"
+            else "INSERT OR IGNORE INTO voice_xp (guild_id, user_id) VALUES (?, ?)"
+        )
+        connection.execute(insert_statement, (guild_id, user_id))
+        lock_suffix = " FOR UPDATE" if connection.engine == "mysql" else ""
+        row = connection.execute(
+            "SELECT audio_xp, video_xp FROM voice_xp WHERE guild_id = ? AND user_id = ?"
+            + lock_suffix,
+            (guild_id, user_id),
+        ).fetchone()
+        old_total = int(row["audio_xp"]) + int(row["video_xp"])
+        connection.execute(
+            "UPDATE voice_xp SET audio_xp = audio_xp + ?, video_xp = video_xp + ? "
+            "WHERE guild_id = ? AND user_id = ?",
+            (audio, video, guild_id, user_id),
+        )
+        audio_total = int(row["audio_xp"]) + audio
+        video_total = int(row["video_xp"]) + video
+    total = audio_total + video_total
+    old_level = int((old_total / 100) ** 0.5)
+    level = int((total / 100) ** 0.5)
+    return {
+        "audio_xp": audio_total,
+        "video_xp": video_total,
+        "total_xp": total,
+        "level": level,
+        "leveled_up": level > old_level,
+    }
+
+
+def get_voice_xp(guild_id: int, user_id: int) -> dict:
+    with closing(_connect()) as connection, connection:
+        row = connection.execute(
+            "SELECT audio_xp, video_xp FROM voice_xp WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        ).fetchone()
+    audio = int(row["audio_xp"]) if row else 0
+    video = int(row["video_xp"]) if row else 0
+    total = audio + video
+    return {
+        "audio_xp": audio,
+        "video_xp": video,
+        "total_xp": total,
+        "level": int((total / 100) ** 0.5),
+    }
+
+
+def get_voice_xp_leaderboard(guild_id: int, limit: int = 10) -> list[dict]:
+    with closing(_connect()) as connection, connection:
+        rows = connection.execute(
+            """SELECT user_id, audio_xp, video_xp, audio_xp + video_xp AS total_xp
+            FROM voice_xp WHERE guild_id = ?
+            ORDER BY total_xp DESC, audio_xp DESC, user_id ASC LIMIT ?""",
+            (guild_id, limit),
+        ).fetchall()
+    return [
+        {
+            **dict(row),
+            "level": int((int(row["total_xp"]) / 100) ** 0.5),
+        }
+        for row in rows
+    ]
 
 
 def set_suggestion_status(

@@ -15,8 +15,8 @@ def _env(*names: str, default: str = "") -> str:
 
 
 TOKEN = _env("DISCORD_TOKEN", "DISCORD_BOT_TOKEN") or None
-GEMINI_API_KEY = _env("GEMINI_API_KEY", "GOOGLE_AI_STUDIO_API_KEY") or None
-GEMINI_MODEL = _env("GEMINI_MODEL", default="gemini-3.8-flash")
+GROQ_API_KEY = _env("GROQ_API_KEY") or None
+GROQ_MODEL = _env("GROQ_MODEL", default="openai/gpt-oss-20b")
 ADMIN_ROLE_ID = int(_env("ADMIN_ROLE_ID", default="0"))
 WEBUI_PASSWORD = _env(
     "WEB_PANEL_PASSWORD",

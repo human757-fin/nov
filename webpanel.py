@@ -363,8 +363,8 @@ def _builder_html(
         plan_content = '<p class="empty-plan">Your reviewed plan will appear here after you describe what you want.</p>'
 
     key_notice = ""
-    if not config.GEMINI_API_KEY:
-        key_notice = '<p class="hint">To enable AI planning, add a Google AI Studio key as the Pterodactyl variable <code>GEMINI_API_KEY</code>, then restart the bot.</p>'
+    if not config.GROQ_API_KEY:
+        key_notice = '<p class="hint">To enable AI planning, add a Groq API key as <code>GROQ_API_KEY</code> in the server .env file, then restart the bot.</p>'
     server_form = f"""<form class="builder-select" method="get" action="/builder"><label>Saved server<select name="guild_id">{''.join(options)}</select></label><button class="secondary" type="submit">Open</button></form>
 <form class="builder-select" method="get" action="/builder"><label>Or enter server ID<input name="guild_id" type="number" min="1" step="1" value="{selected}" placeholder="Discord server ID" required></label><button class="secondary" type="submit">Open</button></form>"""
     current_server = (

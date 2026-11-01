@@ -12,7 +12,8 @@ import aiohttp
 import config
 
 DISCORD_API = "https://discord.com/api/v10"
-GEMINI_API = "https://generativelanguage.googleapis.com/v1beta"
+GROQ_API = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_STRICT_SCHEMA_MODELS = {"openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b"}
 MAX_OPERATIONS = 75
 MAX_CATEGORIES = 20
 MAX_CHANNELS = 50
@@ -205,13 +206,13 @@ async def get_guild_context(guild_id: int) -> dict:
 
 
 async def generate_plan(history: list[dict], guild_context: dict) -> dict:
-    if not config.GEMINI_API_KEY:
+    if not config.GROQ_API_KEY:
         raise BuilderError(
-            "Add a Google AI Studio key as Pterodactyl variable GEMINI_API_KEY to use the AI builder."
+            "Add a Groq API key as GROQ_API_KEY in the server's .env file to use the AI builder."
         )
-    model = config.GEMINI_MODEL
-    if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", model):
-        raise BuilderError("GEMINI_MODEL contains an invalid model name.")
+    model = config.GROQ_MODEL
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}/[A-Za-z0-9._-]{1,80}", model):
+        raise BuilderError("GROQ_MODEL contains an invalid model name.")
     system_instruction = (
         "You help a server owner design a Discord server. Return a complete proposed plan "
         "using the required JSON format. Never claim you have changed Discord. The plan is "
@@ -239,42 +240,74 @@ async def generate_plan(history: list[dict], guild_context: dict) -> dict:
             ensure_ascii=False,
         )
     )
+    messages = [{"role": "system", "content": system_instruction}]
+    for item in history[-16:]:
+        role = "assistant" if item.get("role") == "model" else "user"
+        text = "".join(
+            part.get("text", "") for part in item.get("parts", [])
+            if isinstance(part, dict) and isinstance(part.get("text", ""), str)
+        )
+        messages.append({"role": role, "content": text})
     body = {
-        "systemInstruction": {"parts": [{"text": system_instruction}]},
-        "contents": history,
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "responseSchema": PLAN_SCHEMA,
-            "maxOutputTokens": 4096,
+        "model": model,
+        "messages": messages,
+        "max_completion_tokens": 4096,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "discord_server_build_plan",
+                "strict": model in GROQ_STRICT_SCHEMA_MODELS,
+                "schema": _groq_schema(PLAN_SCHEMA),
+            },
         },
     }
     timeout = aiohttp.ClientTimeout(total=45)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         try:
             async with session.post(
-                f"{GEMINI_API}/models/{model}:generateContent",
-                headers={"x-goog-api-key": config.GEMINI_API_KEY},
+                GROQ_API,
+                headers={"Authorization": f"Bearer {config.GROQ_API_KEY}"},
                 json=body,
             ) as response:
                 result = await response.json(content_type=None)
                 if response.status >= 400:
+                    if response.status == 429:
+                        raise BuilderError(
+                            "Groq's current free-tier limit was reached. Wait for the limit to reset or check your Groq account limits."
+                        )
                     raise BuilderError(
-                        "Google AI Studio could not create a plan. Check the API key, model, and AI Studio quota."
+                        "Groq could not create a plan. Check the GROQ_API_KEY and GROQ_MODEL values."
                     )
         except asyncio.TimeoutError as error:
             raise BuilderError("The AI planner took too long. Try again.") from error
+        except json.JSONDecodeError as error:
+            raise BuilderError("Groq returned an unreadable response. Please try again.") from error
         except aiohttp.ClientError as error:
-            raise BuilderError("Could not reach Google AI Studio. Try again.") from error
+            raise BuilderError("Could not reach Groq. Try again in a moment.") from error
 
     try:
-        candidate = result["candidates"][0]
-        text = "".join(
-            part.get("text", "") for part in candidate["content"]["parts"]
-        )
+        text = result["choices"][0]["message"]["content"]
         raw_plan = json.loads(text)
     except (KeyError, IndexError, TypeError, json.JSONDecodeError) as error:
         raise BuilderError("The AI did not return a usable plan. Please rephrase and try again.") from error
     return validate_plan(raw_plan, guild_context)
+
+
+def _groq_schema(schema: dict) -> dict:
+    """Convert the provider-neutral schema to Groq's strict JSON Schema subset."""
+    converted = {}
+    for key, value in schema.items():
+        if key == "type" and isinstance(value, str):
+            converted[key] = value.lower()
+        elif key == "properties" and isinstance(value, dict):
+            converted[key] = {name: _groq_schema(prop) for name, prop in value.items()}
+        elif key == "items" and isinstance(value, dict):
+            converted[key] = _groq_schema(value)
+        else:
+            converted[key] = value
+    if converted.get("type") == "object":
+        converted["additionalProperties"] = False
+    return converted
 
 
 def validate_plan(plan: object, guild_context: dict) -> dict:

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import html
+import json
 import logging
 import os
 import secrets
@@ -18,6 +20,7 @@ from aiohttp import web
 
 import config
 import database
+import server_builder
 
 COOKIE_NAME = "nov_web_session"
 LAST_GUILD_COOKIE = "nov_last_guild"
@@ -38,6 +41,10 @@ except FileNotFoundError:
         with os.fdopen(fd, "wb") as key_file:
             key_file.write(SESSION_SECRET)
 LOGIN_ATTEMPTS: dict[str, deque[float]] = defaultdict(deque)
+BUILDER_SESSIONS: dict[str, dict] = {}
+BUILDER_SESSION_TTL = 2 * 60 * 60
+BUILDER_MAX_SESSIONS = 256
+BUILDER_GLOBAL_REQUESTS: deque[float] = deque()
 ALLOWED_STATUSES = {"pending", "approved", "denied", "implemented"}
 ALLOWED_PLACEHOLDERS = {"mention", "server", "member_count", "username"}
 
@@ -171,6 +178,7 @@ def _dashboard_html(request: web.Request, guild_id: int | None, message: str = "
             f'<option value="{guild_id}"{chosen}>{_escape(guild_name)} · {guild_id}</option>'
         )
     selector = "".join(options)
+    builder_href = f"/builder?{urlencode({'guild_id': selected})}" if selected else "/builder"
     server_picker = f"""<form class="inline" method="get" action="/">
 <label>Saved server<select name="guild_id">{selector}</select></label><button class="secondary" type="submit">Open</button></form>
 <form class="inline" method="get" action="/"><label>Open by server ID<input name="guild_id" type="number" min="1" step="1" placeholder="Discord server ID" required></label><button class="secondary" type="submit">Open</button></form>"""
@@ -229,9 +237,309 @@ def _dashboard_html(request: web.Request, guild_id: int | None, message: str = "
 
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Nov Bot · Management</title><style>{_CSS}</style></head>
 <body><main><header class="top"><div><div class="brand"><span class="mark">N</span><div><b>Nov Bot</b><small>Management panel</small></div></div><h1>Dashboard</h1><p class="muted">Welcome settings and community suggestions</p></div>
-<form class="logout" method="post" action="/logout"><input type="hidden" name="csrf" value="{_escape(csrf)}"><button class="secondary" type="submit">Sign out</button></form></header>
+<div class="inline"><a class="button secondary" href="{_escape(builder_href)}">AI server builder</a><form class="logout" method="post" action="/logout"><input type="hidden" name="csrf" value="{_escape(csrf)}"><button class="secondary" type="submit">Sign out</button></form></div></header>
 {notice}<section class="card" style="margin-bottom:18px"><div class="card-head"><div><h2>Server</h2><p>Choose a server or enter its Discord ID</p></div></div>{server_picker}</section>
 <div class="grid">{content}</div></main></body></html>"""
+
+
+_BUILDER_CSS = """
+.builder-layout{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(320px,.95fr);gap:18px;align-items:start}.builder-card{min-height:480px}.chat-log{height:340px;overflow:auto;display:flex;flex-direction:column;gap:12px;padding:12px;background:#0c1323;border:1px solid var(--line);border-radius:12px}.bubble{max-width:92%;padding:12px 14px;border-radius:13px;white-space:pre-wrap;overflow-wrap:anywhere}.bubble.user{align-self:flex-end;background:#26375b}.bubble.assistant{align-self:flex-start;background:#17243b}.bubble small{display:block;color:var(--muted);font-size:11px;margin-bottom:4px}.plan-list{margin:12px 0 0;padding-left:20px}.plan-list li{margin:5px 0}.plan-section{border-top:1px solid var(--line);padding:13px 0}.plan-section:first-child{border-top:0}.role-preview{border-left:3px solid #34425e;padding:6px 10px;margin:8px 0;background:#10192b;border-radius:3px 8px 8px 3px}.role-preview small{display:block;color:var(--muted);margin-top:3px}.builder-select{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:end}.builder-select label{margin:0}.confirm{font-weight:500!important;display:flex;gap:9px;align-items:flex-start}.confirm input{width:auto;margin:3px 0 0}.empty-plan{color:var(--muted);padding:24px 0}.builder-header{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:18px}.builder-header a{color:var(--accent)}
+@media(max-width:820px){.builder-layout{grid-template-columns:1fr}.builder-card{min-height:0}.chat-log{height:300px}.builder-select{grid-template-columns:1fr}}
+"""
+
+
+def _builder_state(request: web.Request) -> dict:
+    now = time.time()
+    for nonce, state in list(BUILDER_SESSIONS.items()):
+        if now - state["touched"] > BUILDER_SESSION_TTL:
+            BUILDER_SESSIONS.pop(nonce, None)
+    nonce = request["session_nonce"]
+    state = BUILDER_SESSIONS.get(nonce)
+    if state is None:
+        if len(BUILDER_SESSIONS) >= BUILDER_MAX_SESSIONS:
+            oldest = min(BUILDER_SESSIONS, key=lambda key: BUILDER_SESSIONS[key]["touched"])
+            BUILDER_SESSIONS.pop(oldest, None)
+        state = {
+            "touched": now,
+            "guild_id": None,
+            "history": [],
+            "messages": [],
+            "plan": None,
+            "plan_id": None,
+            "applied": False,
+            "notice": None,
+            "last_chat": 0.0,
+            "lock": asyncio.Lock(),
+        }
+        BUILDER_SESSIONS[nonce] = state
+    state["touched"] = now
+    return state
+
+
+def _parse_guild_id(value: object) -> int | None:
+    try:
+        guild_id = int(str(value or "").strip())
+    except (TypeError, ValueError):
+        return None
+    return guild_id if 0 < guild_id < 10**20 else None
+
+
+def _builder_html(
+    request: web.Request,
+    state: dict,
+    guild_id: int | None,
+    guild_name: str,
+) -> str:
+    csrf = _escape(request["csrf"])
+    notice = ""
+    if state["notice"]:
+        kind, message = state["notice"]
+        notice = f'<p class="{kind}">{_escape(message)}</p>'
+    guilds = database.get_dashboard_guilds()
+    selected = "" if guild_id is None else str(guild_id)
+    options = ['<option value="">Choose a saved server…</option>']
+    for item in guilds:
+        item_id = str(item["guild_id"])
+        chosen = " selected" if item_id == selected else ""
+        options.append(
+            f'<option value="{_escape(item_id)}"{chosen}>{_escape(item.get("guild_name") or "Server")} · {_escape(item_id)}</option>'
+        )
+
+    messages = []
+    for item in state["messages"]:
+        role = "user" if item["role"] == "user" else "assistant"
+        label = "You" if role == "user" else "Nov AI"
+        messages.append(
+            f'<div class="bubble {role}"><small>{label}</small>{_escape(item["text"])}</div>'
+        )
+    if not messages:
+        messages.append(
+            '<div class="bubble assistant"><small>Nov AI</small>Describe the community you want. I’ll draft categories, channels, and roles for review.</div>'
+        )
+
+    plan = state["plan"]
+    if plan:
+        category_rows = "".join(
+            f'<li><strong>{_escape(item["name"])}</strong> <span class="hint">category</span></li>'
+            for item in plan["categories"]
+        )
+        channel_items = []
+        for item in plan["channels"]:
+            category_label = f' · {_escape(item["category"])}' if item["category"] else ""
+            topic_label = f'<br><span class="hint">{_escape(item["topic"])}</span>' if item["topic"] else ""
+            channel_items.append(
+                f'<li><strong>#{_escape(item["name"])}</strong> · {_escape(item["type"])}{category_label}{topic_label}</li>'
+            )
+        channel_rows = "".join(channel_items)
+        role_items = []
+        for item in plan["roles"]:
+            color = item["color_hex"] if item["color_hex"] != "Default" else "#34425e"
+            permissions = ", ".join(item["permissions"]) or "No extra permissions"
+            flags = []
+            if item["hoist"]:
+                flags.append("shown separately")
+            if item["mentionable"]:
+                flags.append("mentionable")
+            detail = f'{permissions} · {", ".join(flags)}' if flags else permissions
+            role_items.append(
+                f'<div class="role-preview" style="border-left-color:{_escape(color)}"><strong>{_escape(item["name"])}</strong><small>{_escape(detail)}</small></div>'
+            )
+        role_rows = "".join(role_items) or '<p class="hint">No roles proposed.</p>'
+        plan_content = f"""<p class="success">{_escape(plan['summary'] or 'Plan ready for review.')}</p>
+<div class="plan-section"><strong>Categories ({len(plan['categories'])})</strong><ul class="plan-list">{category_rows or '<li class="hint">None</li>'}</ul></div>
+<div class="plan-section"><strong>Channels ({len(plan['channels'])})</strong><ul class="plan-list">{channel_rows or '<li class="hint">None</li>'}</ul></div>
+<div class="plan-section"><strong>Roles ({len(plan['roles'])})</strong><div>{role_rows}</div><p class="hint">New roles are not assigned to members automatically.</p></div>
+<p class="hint">Applying creates the listed resources on { _escape(guild_name) }. Existing items are not edited or deleted.</p>"""
+        if state["applied"]:
+            plan_content += '<p class="success">This plan has already been applied.</p>'
+        elif plan["categories"] or plan["channels"] or plan["roles"]:
+            plan_content += f"""<form method="post" action="/builder/apply">
+<input type="hidden" name="csrf" value="{csrf}"><input type="hidden" name="guild_id" value="{selected}"><input type="hidden" name="plan_id" value="{_escape(state['plan_id'])}">
+<label class="confirm"><input type="checkbox" name="confirm" value="yes" required><span>I reviewed this plan and want to create these resources.</span></label>
+<button type="submit">Apply plan to server</button></form>"""
+        else:
+            plan_content += '<p class="hint">This plan has no changes to apply.</p>'
+    else:
+        plan_content = '<p class="empty-plan">Your reviewed plan will appear here after you describe what you want.</p>'
+
+    key_notice = ""
+    if not config.GEMINI_API_KEY:
+        key_notice = '<p class="hint">To enable AI planning, add a Google AI Studio key as the Pterodactyl variable <code>GEMINI_API_KEY</code>, then restart the bot.</p>'
+    server_form = f"""<form class="builder-select" method="get" action="/builder"><label>Saved server<select name="guild_id">{''.join(options)}</select></label><button class="secondary" type="submit">Open</button></form>
+<form class="builder-select" method="get" action="/builder"><label>Or enter server ID<input name="guild_id" type="number" min="1" step="1" value="{selected}" placeholder="Discord server ID" required></label><button class="secondary" type="submit">Open</button></form>"""
+    current_server = (
+        f'<p class="hint">Selected server: <strong>{_escape(guild_name)}</strong> · {selected}</p>'
+        if guild_id is not None
+        else '<p class="hint">Choose a saved server or enter its ID. The bot must be a member of that server.</p>'
+    )
+    chat_form = ""
+    if guild_id is not None:
+        chat_form = f"""<form method="post" action="/builder/chat"><input type="hidden" name="csrf" value="{csrf}"><input type="hidden" name="guild_id" value="{selected}">
+<label for="builder-prompt">What should this server look like?</label><textarea id="builder-prompt" name="message" maxlength="2000" required placeholder="A cozy gaming community with announcements, LFG channels, and moderator roles"></textarea>
+<button type="submit">Draft preview</button></form>"""
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Nov Bot · AI server builder</title><style>{_CSS}{_BUILDER_CSS}</style></head>
+<body><main><header class="builder-header"><div><a href="/">← Management dashboard</a><h1>AI server builder</h1><p class="muted">Chat to draft a plan, review it, then choose when to apply it.</p></div><form class="logout" method="post" action="/logout"><input type="hidden" name="csrf" value="{csrf}"><button class="secondary" type="submit">Sign out</button></form></header>
+{notice}<section class="card" style="margin-bottom:18px"><div class="card-head"><div><h2>Choose server</h2><p>The plan is scoped to one server at a time.</p></div></div>{server_form}{current_server}{key_notice}</section>
+<div class="builder-layout"><section class="card builder-card"><div class="card-head"><div><h2>Design chat</h2><p>Nothing changes on Discord until you apply a reviewed plan.</p></div></div><div class="chat-log">{''.join(messages)}</div>{chat_form}</section>
+<section class="card builder-card"><div class="card-head"><div><h2>Plan preview</h2><p>{_escape(guild_name) if guild_id else 'Choose a server to begin'}</p></div></div>{plan_content}</section></div>
+<p class="hint" style="margin-top:18px">The builder only creates categories, text/voice channels, and roles. It will not remove or change existing resources.</p></main></body></html>"""
+
+
+def _guild_label(guild_id: int) -> str:
+    for item in database.get_dashboard_guilds():
+        if int(item["guild_id"]) == guild_id:
+            return str(item.get("guild_name") or f"Server {guild_id}")
+    return f"Server {guild_id}"
+
+
+async def builder_page(request: web.Request) -> web.Response:
+    state = _builder_state(request)
+    requested = request.query.get("guild_id")
+    if requested is not None:
+        guild_id = _parse_guild_id(requested)
+        if requested and guild_id is None:
+            state["notice"] = ("error", "Enter a valid Discord server ID.")
+            guild_id = None
+    else:
+        guild_id = (
+            _parse_guild_id(state["guild_id"])
+            or _parse_guild_id(request.cookies.get(LAST_GUILD_COOKIE))
+        )
+        if guild_id is None:
+            saved = database.get_dashboard_guilds()
+            if saved:
+                guild_id = _parse_guild_id(saved[0]["guild_id"])
+
+    if guild_id != state["guild_id"]:
+        state.update(
+            guild_id=guild_id,
+            history=[],
+            messages=[],
+            plan=None,
+            plan_id=None,
+            applied=False,
+            notice=state["notice"] if requested is not None and guild_id is None else None,
+        )
+    response = web.Response(
+        text=_builder_html(request, state, guild_id, _guild_label(guild_id) if guild_id else ""),
+        content_type="text/html",
+    )
+    if guild_id:
+        response.set_cookie(
+            LAST_GUILD_COOKIE,
+            str(guild_id),
+            max_age=SESSION_TTL,
+            httponly=True,
+            secure=config.WEBUI_SECURE_COOKIE,
+            samesite="Lax",
+            path="/",
+        )
+    return response
+
+
+def _builder_redirect(guild_id: int) -> web.HTTPSeeOther:
+    return web.HTTPSeeOther(f"/builder?{urlencode({'guild_id': guild_id})}")
+
+
+async def builder_chat(request: web.Request) -> web.Response:
+    form = await request.post()
+    _check_csrf(request, form)
+    guild_id = _parse_guild_id(form.get("guild_id"))
+    message = str(form.get("message", "")).strip()
+    state = _builder_state(request)
+    if guild_id is None or guild_id != state["guild_id"]:
+        raise web.HTTPBadRequest(text="Choose a server before sending a design request.")
+    if not message or len(message) > 2000:
+        state["notice"] = ("error", "Describe your server in 1–2000 characters.")
+        raise _builder_redirect(guild_id)
+
+    async with state["lock"]:
+        now = time.monotonic()
+        if now - state["last_chat"] < 3:
+            state["notice"] = ("error", "Please wait a few seconds before sending another request.")
+            raise _builder_redirect(guild_id)
+        while BUILDER_GLOBAL_REQUESTS and now - BUILDER_GLOBAL_REQUESTS[0] > 60:
+            BUILDER_GLOBAL_REQUESTS.popleft()
+        if len(BUILDER_GLOBAL_REQUESTS) >= 20:
+            state["notice"] = ("error", "The AI planner is busy. Wait a minute before trying again.")
+            raise _builder_redirect(guild_id)
+        state["last_chat"] = now
+        BUILDER_GLOBAL_REQUESTS.append(now)
+        try:
+            context = await server_builder.get_guild_context(guild_id)
+            if not context["can_manage_channels"] and not context["can_manage_roles"]:
+                raise server_builder.BuilderError(
+                    "The bot needs Manage Channels or Manage Roles permission to build this server."
+                )
+            history = state["history"] + [{"role": "user", "parts": [{"text": message}]}]
+            plan = await server_builder.generate_plan(history[-16:], context)
+            model_context = (
+                f"{plan['reply']}\nCurrent proposed plan JSON: "
+                + json.dumps(
+                    {key: plan[key] for key in ("summary", "categories", "channels", "roles")},
+                    ensure_ascii=False,
+                )
+            )
+            state["history"] = (
+                history + [{"role": "model", "parts": [{"text": model_context}]}]
+            )[-16:]
+            state["messages"].extend(
+                [{"role": "user", "text": message}, {"role": "model", "text": plan["reply"] or "Plan drafted. Review the preview."}]
+            )
+            state["messages"] = state["messages"][-24:]
+            state["plan"] = plan
+            state["plan_id"] = secrets.token_urlsafe(24)
+            state["applied"] = False
+            state["notice"] = ("success", "Draft ready. Review every item in the preview before applying it.")
+        except server_builder.BuilderError as error:
+            state["messages"].append({"role": "user", "text": message})
+            state["messages"] = state["messages"][-24:]
+            state["notice"] = ("error", str(error))
+        except Exception:
+            logging.exception("AI server builder failed while preparing a plan")
+            state["notice"] = ("error", "The planner could not prepare a preview. Try again in a moment.")
+    raise _builder_redirect(guild_id)
+
+
+async def builder_apply(request: web.Request) -> web.Response:
+    form = await request.post()
+    _check_csrf(request, form)
+    guild_id = _parse_guild_id(form.get("guild_id"))
+    state = _builder_state(request)
+    supplied_plan = str(form.get("plan_id", ""))
+    if guild_id is None or guild_id != state["guild_id"]:
+        raise web.HTTPBadRequest(text="The selected server changed. Reload the builder and review the plan again.")
+
+    async with state["lock"]:
+        if (
+            form.get("confirm") != "yes"
+            or state["plan"] is None
+            or state["applied"]
+            or not state["plan_id"]
+            or not hmac.compare_digest(supplied_plan, state["plan_id"])
+        ):
+            state["notice"] = ("error", "Review the current plan and check the confirmation box before applying it.")
+            raise _builder_redirect(guild_id)
+        try:
+            created = await server_builder.apply_plan(guild_id, state["plan"])
+            state["applied"] = True
+            state["notice"] = ("success", f"Created {len(created)} server resources successfully.")
+        except server_builder.BuilderError as error:
+            partial = getattr(error, "created", [])
+            if partial:
+                state["applied"] = True
+                summary = ", ".join(partial[:8])
+                suffix = " and more" if len(partial) > 8 else ""
+                state["notice"] = (
+                    "error",
+                    f"Discord stopped the operation after creating {len(partial)} items: {summary}{suffix}. This plan is locked to prevent duplicate creation. {error}",
+                )
+            else:
+                state["notice"] = ("error", str(error))
+        except Exception:
+            logging.exception("AI server builder failed while applying a plan")
+            state["notice"] = ("error", "The plan could not be applied. Review the server and retry if no items were created.")
+    raise _builder_redirect(guild_id)
 
 
 async def health(_: web.Request) -> web.Response:
@@ -466,6 +774,9 @@ def create_app() -> web.Application:
             web.get("/login", login_page),
             web.post("/login", login),
             web.get("/", dashboard),
+            web.get("/builder", builder_page),
+            web.post("/builder/chat", builder_chat),
+            web.post("/builder/apply", builder_apply),
             web.post("/settings", save_settings),
             web.post("/suggestions/status", update_suggestion),
             web.post("/tickets/settings", save_ticket_settings),

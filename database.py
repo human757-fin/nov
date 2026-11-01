@@ -279,6 +279,39 @@ def initialize() -> None:
                         INDEX voice_xp_leaderboard (guild_id, audio_xp, video_xp)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
                 )
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS member_xp (
+                        guild_id BIGINT NOT NULL,
+                        user_id BIGINT NOT NULL,
+                        message_xp BIGINT NOT NULL DEFAULT 0,
+                        audio_xp BIGINT NOT NULL DEFAULT 0,
+                        video_xp BIGINT NOT NULL DEFAULT 0,
+                        last_message_at BIGINT NULL,
+                        last_voice_at BIGINT NULL,
+                        PRIMARY KEY (guild_id, user_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
+                )
+                connection.execute(
+                    """INSERT IGNORE INTO member_xp
+                    (guild_id, user_id, audio_xp, video_xp)
+                    SELECT guild_id, user_id, audio_xp, video_xp FROM voice_xp"""
+                )
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS xp_settings (
+                        guild_id BIGINT NOT NULL PRIMARY KEY,
+                        enabled TINYINT(1) NOT NULL DEFAULT 1,
+                        announce_channel_id BIGINT NULL
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
+                )
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS xp_role_rewards (
+                        guild_id BIGINT NOT NULL,
+                        level INTEGER NOT NULL,
+                        role_id BIGINT NOT NULL,
+                        PRIMARY KEY (guild_id, level),
+                        UNIQUE KEY xp_reward_role (guild_id, role_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
+                )
             else:
                 connection.execute(
                     """CREATE TABLE IF NOT EXISTS ticket_settings (
@@ -324,6 +357,39 @@ def initialize() -> None:
                         audio_xp INTEGER NOT NULL DEFAULT 0,
                         video_xp INTEGER NOT NULL DEFAULT 0,
                         PRIMARY KEY (guild_id, user_id)
+                    )"""
+                )
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS member_xp (
+                        guild_id INTEGER NOT NULL,
+                        user_id INTEGER NOT NULL,
+                        message_xp INTEGER NOT NULL DEFAULT 0,
+                        audio_xp INTEGER NOT NULL DEFAULT 0,
+                        video_xp INTEGER NOT NULL DEFAULT 0,
+                        last_message_at INTEGER,
+                        last_voice_at INTEGER,
+                        PRIMARY KEY (guild_id, user_id)
+                    )"""
+                )
+                connection.execute(
+                    """INSERT OR IGNORE INTO member_xp
+                    (guild_id, user_id, audio_xp, video_xp)
+                    SELECT guild_id, user_id, audio_xp, video_xp FROM voice_xp"""
+                )
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS xp_settings (
+                        guild_id INTEGER NOT NULL PRIMARY KEY,
+                        enabled INTEGER NOT NULL DEFAULT 1,
+                        announce_channel_id INTEGER
+                    )"""
+                )
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS xp_role_rewards (
+                        guild_id INTEGER NOT NULL,
+                        level INTEGER NOT NULL,
+                        role_id INTEGER NOT NULL,
+                        PRIMARY KEY (guild_id, level),
+                        UNIQUE (guild_id, role_id)
                     )"""
                 )
             if is_mysql:
@@ -553,36 +619,94 @@ def get_user_suggestions(
 
 
 def award_voice_xp(
-    guild_id: int, user_id: int, *, audio: int, video: int
-) -> dict:
-    """Add voice XP and return the member's updated totals and level."""
+    guild_id: int,
+    user_id: int,
+    *,
+    audio: int,
+    video: int,
+    cooldown_seconds: int = 300,
+    now: int | None = None,
+) -> dict | None:
+    """Add voice XP to the unified member ledger and return the new level."""
+    now = int(time.time()) if now is None else now
     with closing(_connect()) as connection, connection:
-        insert_statement = (
-            "INSERT IGNORE INTO voice_xp (guild_id, user_id) VALUES (?, ?)"
-            if connection.engine == "mysql"
-            else "INSERT OR IGNORE INTO voice_xp (guild_id, user_id) VALUES (?, ?)"
-        )
-        connection.execute(insert_statement, (guild_id, user_id))
+        _ensure_member_xp_row(connection, guild_id, user_id)
         lock_suffix = " FOR UPDATE" if connection.engine == "mysql" else ""
         row = connection.execute(
-            "SELECT audio_xp, video_xp FROM voice_xp WHERE guild_id = ? AND user_id = ?"
+            "SELECT message_xp, audio_xp, video_xp, last_voice_at FROM member_xp "
+            "WHERE guild_id = ? AND user_id = ?"
             + lock_suffix,
             (guild_id, user_id),
         ).fetchone()
-        old_total = int(row["audio_xp"]) + int(row["video_xp"])
+        previous = row["last_voice_at"]
+        if previous is not None and now - int(previous) < cooldown_seconds:
+            return None
+        old_total = sum(int(row[key]) for key in ("message_xp", "audio_xp", "video_xp"))
         connection.execute(
-            "UPDATE voice_xp SET audio_xp = audio_xp + ?, video_xp = video_xp + ? "
+            "UPDATE member_xp SET audio_xp = audio_xp + ?, video_xp = video_xp + ?, "
+            "last_voice_at = ? "
             "WHERE guild_id = ? AND user_id = ?",
-            (audio, video, guild_id, user_id),
+            (audio, video, now, guild_id, user_id),
         )
+        message_total = int(row["message_xp"])
         audio_total = int(row["audio_xp"]) + audio
         video_total = int(row["video_xp"]) + video
-    total = audio_total + video_total
-    old_level = int((old_total / 100) ** 0.5)
+    return _member_xp_result(message_total, audio_total, video_total, old_total)
+
+
+def award_message_xp(
+    guild_id: int,
+    user_id: int,
+    *,
+    amount: int,
+    cooldown_seconds: int,
+    now: int | None = None,
+) -> dict | None:
+    """Award message XP only when the persistent per-member cooldown has elapsed."""
+    now = int(time.time()) if now is None else now
+    with closing(_connect()) as connection, connection:
+        _ensure_member_xp_row(connection, guild_id, user_id)
+        lock_suffix = " FOR UPDATE" if connection.engine == "mysql" else ""
+        row = connection.execute(
+            "SELECT message_xp, audio_xp, video_xp, last_message_at FROM member_xp "
+            "WHERE guild_id = ? AND user_id = ?" + lock_suffix,
+            (guild_id, user_id),
+        ).fetchone()
+        previous = row["last_message_at"]
+        if previous is not None and now - int(previous) < cooldown_seconds:
+            return None
+        old_total = sum(int(row[key]) for key in ("message_xp", "audio_xp", "video_xp"))
+        connection.execute(
+            "UPDATE member_xp SET message_xp = message_xp + ?, last_message_at = ? "
+            "WHERE guild_id = ? AND user_id = ?",
+            (amount, now, guild_id, user_id),
+        )
+        message_total = int(row["message_xp"]) + amount
+        audio_total = int(row["audio_xp"])
+        video_total = int(row["video_xp"])
+    return _member_xp_result(message_total, audio_total, video_total, old_total)
+
+
+def _ensure_member_xp_row(connection: _Connection, guild_id: int, user_id: int) -> None:
+    insert_statement = (
+        "INSERT IGNORE INTO member_xp (guild_id, user_id) VALUES (?, ?)"
+        if connection.engine == "mysql"
+        else "INSERT OR IGNORE INTO member_xp (guild_id, user_id) VALUES (?, ?)"
+    )
+    connection.execute(insert_statement, (guild_id, user_id))
+
+
+def _member_xp_result(
+    message: int, audio: int, video: int, previous_total: int
+) -> dict:
+    total = message + audio + video
+    old_level = int((previous_total / 100) ** 0.5)
     level = int((total / 100) ** 0.5)
     return {
-        "audio_xp": audio_total,
-        "video_xp": video_total,
+        "message_xp": message,
+        "audio_xp": audio,
+        "voice_xp": audio,
+        "video_xp": video,
         "total_xp": total,
         "level": level,
         "leveled_up": level > old_level,
@@ -592,14 +716,17 @@ def award_voice_xp(
 def get_voice_xp(guild_id: int, user_id: int) -> dict:
     with closing(_connect()) as connection, connection:
         row = connection.execute(
-            "SELECT audio_xp, video_xp FROM voice_xp WHERE guild_id = ? AND user_id = ?",
+            "SELECT message_xp, audio_xp, video_xp FROM member_xp WHERE guild_id = ? AND user_id = ?",
             (guild_id, user_id),
         ).fetchone()
+    message = int(row["message_xp"]) if row else 0
     audio = int(row["audio_xp"]) if row else 0
     video = int(row["video_xp"]) if row else 0
-    total = audio + video
+    total = message + audio + video
     return {
+        "message_xp": message,
         "audio_xp": audio,
+        "voice_xp": audio,
         "video_xp": video,
         "total_xp": total,
         "level": int((total / 100) ** 0.5),
@@ -609,8 +736,9 @@ def get_voice_xp(guild_id: int, user_id: int) -> dict:
 def get_voice_xp_leaderboard(guild_id: int, limit: int = 10) -> list[dict]:
     with closing(_connect()) as connection, connection:
         rows = connection.execute(
-            """SELECT user_id, audio_xp, video_xp, audio_xp + video_xp AS total_xp
-            FROM voice_xp WHERE guild_id = ?
+            """SELECT user_id, message_xp, audio_xp, video_xp,
+            message_xp + audio_xp + video_xp AS total_xp
+            FROM member_xp WHERE guild_id = ?
             ORDER BY total_xp DESC, audio_xp DESC, user_id ASC LIMIT ?""",
             (guild_id, limit),
         ).fetchall()
@@ -621,6 +749,84 @@ def get_voice_xp_leaderboard(guild_id: int, limit: int = 10) -> list[dict]:
         }
         for row in rows
     ]
+
+
+@lru_cache(maxsize=2048)
+def get_xp_settings(guild_id: int) -> dict:
+    with closing(_connect()) as connection, connection:
+        row = connection.execute(
+            "SELECT enabled, announce_channel_id FROM xp_settings WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()
+    if row is None:
+        return {"enabled": True, "announce_channel_id": None}
+    return {
+        "enabled": bool(row["enabled"]),
+        "announce_channel_id": row["announce_channel_id"],
+    }
+
+
+def set_xp_enabled(guild_id: int, enabled: bool) -> None:
+    _upsert_xp_settings(guild_id, "enabled", int(enabled))
+
+
+def set_xp_announce_channel(guild_id: int, channel_id: int | None) -> None:
+    _upsert_xp_settings(guild_id, "announce_channel_id", channel_id)
+
+
+def _upsert_xp_settings(guild_id: int, column: str, value) -> None:
+    if column not in {"enabled", "announce_channel_id"}:
+        raise ValueError("Unsupported XP setting")
+    with closing(_connect()) as connection, connection:
+        insert_statement = (
+            "INSERT IGNORE INTO xp_settings (guild_id) VALUES (?)"
+            if connection.engine == "mysql"
+            else "INSERT OR IGNORE INTO xp_settings (guild_id) VALUES (?)"
+        )
+        connection.execute(insert_statement, (guild_id,))
+        connection.execute(
+            f"UPDATE xp_settings SET {column} = ? WHERE guild_id = ?",
+            (value, guild_id),
+        )
+    get_xp_settings.cache_clear()
+
+
+def set_xp_role_reward(guild_id: int, level: int, role_id: int) -> None:
+    with closing(_connect()) as connection, connection:
+        if connection.engine == "mysql":
+            connection.execute(
+                """INSERT INTO xp_role_rewards (guild_id, level, role_id)
+                VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE role_id = VALUES(role_id)""",
+                (guild_id, level, role_id),
+            )
+        else:
+            connection.execute(
+                """INSERT INTO xp_role_rewards (guild_id, level, role_id)
+                VALUES (?, ?, ?) ON CONFLICT(guild_id, level)
+                DO UPDATE SET role_id = excluded.role_id""",
+                (guild_id, level, role_id),
+            )
+
+
+def remove_xp_role_reward(guild_id: int, level: int) -> bool:
+    with closing(_connect()) as connection, connection:
+        cursor = connection.execute(
+            "DELETE FROM xp_role_rewards WHERE guild_id = ? AND level = ?",
+            (guild_id, level),
+        )
+        return cursor.rowcount > 0
+
+
+def get_xp_role_rewards(guild_id: int, *, up_to_level: int | None = None) -> list[dict]:
+    query = "SELECT level, role_id FROM xp_role_rewards WHERE guild_id = ?"
+    params: tuple = (guild_id,)
+    if up_to_level is not None:
+        query += " AND level <= ?"
+        params = (guild_id, up_to_level)
+    query += " ORDER BY level"
+    with closing(_connect()) as connection, connection:
+        rows = connection.execute(query, params).fetchall()
+    return [dict(row) for row in rows]
 
 
 def set_suggestion_status(

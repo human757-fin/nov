@@ -39,7 +39,7 @@ BUILT_IN_FEATURES = [
     ),
     (
         "Built-in · Voice XP",
-        "Earn voice attendance XP and video bonuses, check your progress with `/rank`, and compare scores with `/voice-leaderboard`.",
+        "Earn XP from messages, voice attendance, camera, and screen sharing. Check progress with `/rank` and compare scores with `/leaderboard`.",
     ),
     (
         "Built-in · Feature suggestions",

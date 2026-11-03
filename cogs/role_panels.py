@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import io
 import logging
+import re
 import secrets
 import time
 
@@ -114,7 +115,7 @@ class RolePickerSelect(discord.ui.Select):
             min_values=1,
             max_values=max_values,
             options=options,
-            custom_id=f"nov:roles:{settings['guild_id']}",
+            custom_id=f"nov:roles:{settings['guild_id']}:{settings.get('panel_id', 'default')}",
         )
         self.cog = cog
 
@@ -202,7 +203,7 @@ class RolePanels(commands.Cog):
         self.challenges: dict[tuple[int, int], dict] = {}
         self.challenge_cooldowns: dict[tuple[int, int], float] = {}
         self._captcha_secret = secrets.token_bytes(32)
-        self._synced_roles: dict[int, tuple] = {}
+        self._synced_roles: dict[tuple[int, str], tuple] = {}
         self._synced_verification: dict[int, tuple] = {}
         self.sync_panels.start()
 
@@ -218,8 +219,11 @@ class RolePanels(commands.Cog):
         for key, requested_at in list(self.challenge_cooldowns.items()):
             if now - requested_at > 60:
                 self.challenge_cooldowns.pop(key, None)
+        role_configs = database.get_all_role_picker_configs()
         for guild in self.bot.guilds:
-            await self._sync_role_picker(guild, database.get_role_picker_config(guild.id))
+            for settings in role_configs:
+                if settings["guild_id"] == guild.id:
+                    await self._sync_role_picker(guild, settings)
             await self._sync_verification(guild, database.get_verification_config(guild.id))
 
     @sync_panels.before_loop
@@ -227,6 +231,8 @@ class RolePanels(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def _sync_role_picker(self, guild: discord.Guild, settings: dict) -> bool:
+        panel_id = settings.get("panel_id", "default")
+        cache_key = (guild.id, panel_id)
         channel_id = settings.get("panel_channel_id")
         message_id = settings.get("panel_message_id")
         if not channel_id:
@@ -246,7 +252,7 @@ class RolePanels(commands.Cog):
             int(channel_id), message_id, settings["title"], settings["description"],
             bool(settings["allow_multiple"]), tuple((role.id, role.name) for role in roles),
         )
-        if self._synced_roles.get(guild.id) == state:
+        if self._synced_roles.get(cache_key) == state:
             return bool(roles)
         try:
             message = await self._fetch_panel_message(channel, message_id)
@@ -256,8 +262,8 @@ class RolePanels(commands.Cog):
             if not roles:
                 if message is not None:
                     await message.delete()
-                database.set_role_picker_panel_message(guild.id, None)
-                self._synced_roles[guild.id] = state
+                database.set_role_picker_panel_message(guild.id, None, panel_id)
+                self._synced_roles[cache_key] = state
                 return False
             view = RolePickerView(self, settings, roles)
             if message is None:
@@ -266,11 +272,11 @@ class RolePanels(commands.Cog):
                     view=view,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
-                database.set_role_picker_panel_message(guild.id, message.id)
+                database.set_role_picker_panel_message(guild.id, message.id, panel_id)
             else:
                 await message.edit(embed=_role_panel_embed(settings), view=view)
             self.bot.add_view(RolePickerView(self, settings, roles), message_id=message.id)
-            self._synced_roles[guild.id] = (
+            self._synced_roles[cache_key] = (
                 int(channel_id), message.id, *state[2:]
             )
             return True
@@ -348,7 +354,9 @@ class RolePanels(commands.Cog):
             return await interaction.response.send_message(
                 "This role menu only works in a server.", ephemeral=True
             )
-        settings = database.get_role_picker_config(interaction.guild.id)
+        custom_id = (interaction.data or {}).get("custom_id", "")
+        panel_id = custom_id.split(":", 3)[3] if custom_id.count(":") >= 3 else "default"
+        settings = database.get_role_picker_config(interaction.guild.id, panel_id)
         allowed_ids = set(settings["role_ids"])
         try:
             selected_ids = {int(value) for value in values}
@@ -588,10 +596,77 @@ class RolePanels(commands.Cog):
         name="rolepanel", description="Configure and publish the self-assign role panel"
     )
 
+    @rolepanel.command(name="create", description="Create another independent role panel")
+    @app_commands.guild_only()
+    @app_commands.check(_management_allowed)
+    @app_commands.describe(panel="Unique panel name using letters, numbers, hyphens, or underscores")
+    async def rolepanel_create(self, interaction: discord.Interaction, panel: str) -> None:
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message("Run this command in a server.", ephemeral=True)
+        panel = panel.strip().lower()
+        if panel == "default" or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", panel):
+            return await interaction.response.send_message(
+                "Use a unique name of 1–32 lowercase letters, numbers, hyphens, or underscores. `default` is reserved.",
+                ephemeral=True,
+            )
+        if not database.create_role_picker_panel(guild.id, panel):
+            return await interaction.response.send_message(f"Role panel `{panel}` already exists.", ephemeral=True)
+        await interaction.response.send_message(
+            f"Created role panel `{panel}`. Configure it with `/rolepanel configure` and set the `panel` option to `{panel}`.",
+            ephemeral=True,
+        )
+
+    @rolepanel.command(name="delete", description="Delete an extra role panel and its message")
+    @app_commands.guild_only()
+    @app_commands.check(_management_allowed)
+    async def rolepanel_delete(self, interaction: discord.Interaction, panel: str) -> None:
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message("Run this command in a server.", ephemeral=True)
+        panel = panel.strip().lower()
+        if panel == "default":
+            return await interaction.response.send_message(
+                "The default role panel cannot be deleted. Remove its roles or reconfigure it instead.",
+                ephemeral=True,
+            )
+        settings = database.get_role_picker_config(guild.id, panel)
+        if panel not in database.list_role_picker_panels(guild.id):
+            return await interaction.response.send_message(f"Unknown role panel `{panel}`.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        channel = guild.get_channel(settings["panel_channel_id"]) if settings["panel_channel_id"] else None
+        if isinstance(channel, discord.TextChannel) and settings["panel_message_id"]:
+            try:
+                message = await channel.fetch_message(settings["panel_message_id"])
+                await message.delete()
+            except discord.NotFound:
+                pass
+            except discord.HTTPException:
+                return await interaction.followup.send(
+                    "I couldn't remove the panel message. Check my channel permissions and try again.",
+                    ephemeral=True,
+                )
+        database.delete_role_picker_panel(guild.id, panel)
+        self._synced_roles.pop((guild.id, panel), None)
+        await interaction.followup.send(f"Deleted role panel `{panel}`.", ephemeral=True)
+
+    @rolepanel.command(name="panels", description="List this server's role panels")
+    @app_commands.guild_only()
+    @app_commands.check(_management_allowed)
+    async def rolepanel_panels(self, interaction: discord.Interaction) -> None:
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message("Run this command in a server.", ephemeral=True)
+        names = database.list_role_picker_panels(guild.id)
+        await interaction.response.send_message(
+            "Role panels: " + ", ".join(f"`{name}`" for name in names), ephemeral=True
+        )
+
     @rolepanel.command(name="configure", description="Set the role panel channel and text")
     @app_commands.guild_only()
     @app_commands.check(_management_allowed)
     @app_commands.describe(
+        panel="Which role panel to edit (default: default)",
         channel="Where the role picker panel should be posted",
         title="Panel heading (leave empty to keep the current title)",
         description="Panel instructions (leave empty to keep the current text)",
@@ -607,6 +682,7 @@ class RolePanels(commands.Cog):
         self,
         interaction: discord.Interaction,
         channel: discord.TextChannel,
+        panel: str = "default",
         title: str | None = None,
         description: str | None = None,
         mode: app_commands.Choice[str] | None = None,
@@ -614,7 +690,12 @@ class RolePanels(commands.Cog):
         guild = interaction.guild
         if guild is None:
             return await interaction.response.send_message("Run this command in a server.", ephemeral=True)
-        settings = database.get_role_picker_config(guild.id)
+        panel = panel.strip().lower()
+        if panel not in database.list_role_picker_panels(guild.id):
+            return await interaction.response.send_message(
+                f"Role panel `{panel}` does not exist. Create it with `/rolepanel create`.", ephemeral=True
+            )
+        settings = database.get_role_picker_config(guild.id, panel)
         title = (title.strip() if title is not None else settings["title"])
         description = (description.strip() if description is not None else settings["description"])
         if not title or len(title) > 256 or not description or len(description) > 4000:
@@ -626,14 +707,14 @@ class RolePanels(commands.Cog):
             mode.value == "multiple" if mode is not None else settings["allow_multiple"]
         )
         database.save_role_picker_config(
-            guild.id, channel.id, title, description, settings["role_ids"], allow_multiple
+            guild.id, channel.id, title, description, settings["role_ids"], allow_multiple, panel
         )
         await interaction.response.defer(ephemeral=True, thinking=True)
-        self._synced_roles.pop(guild.id, None)
+        self._synced_roles.pop((guild.id, panel), None)
         if settings["role_ids"]:
-            await self._sync_role_picker(guild, database.get_role_picker_config(guild.id))
+            await self._sync_role_picker(guild, database.get_role_picker_config(guild.id, panel))
         await interaction.followup.send(
-            f"Role panel settings saved for {channel.mention}. Use `/rolepanel add` to add roles, then `/rolepanel publish`.",
+            f"Role panel `{panel}` settings saved for {channel.mention}. Use `/rolepanel add` to add roles, then `/rolepanel publish`.",
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -641,7 +722,10 @@ class RolePanels(commands.Cog):
     @rolepanel.command(name="add", description="Add an assignable role to the panel")
     @app_commands.guild_only()
     @app_commands.check(_management_allowed)
-    async def rolepanel_add(self, interaction: discord.Interaction, role: discord.Role) -> None:
+    @app_commands.describe(panel="Which role panel to edit (default: default)")
+    async def rolepanel_add(
+        self, interaction: discord.Interaction, role: discord.Role, panel: str = "default"
+    ) -> None:
         guild = interaction.guild
         if guild is None:
             return await interaction.response.send_message("Run this command in a server.", ephemeral=True)
@@ -650,7 +734,10 @@ class RolePanels(commands.Cog):
                 "That role is not assignable by the bot or has admin, moderation, or management permissions.",
                 ephemeral=True,
             )
-        settings = database.get_role_picker_config(guild.id)
+        panel = panel.strip().lower()
+        if panel not in database.list_role_picker_panels(guild.id):
+            return await interaction.response.send_message(f"Unknown role panel `{panel}`.", ephemeral=True)
+        settings = database.get_role_picker_config(guild.id, panel)
         if role.id in settings["role_ids"]:
             return await interaction.response.send_message("That role is already on the panel.", ephemeral=True)
         if len(settings["role_ids"]) >= 25:
@@ -663,24 +750,31 @@ class RolePanels(commands.Cog):
             settings["description"],
             settings["role_ids"],
             settings["allow_multiple"],
+            panel,
         )
         await interaction.response.defer(ephemeral=True, thinking=True)
-        self._synced_roles.pop(guild.id, None)
+        self._synced_roles.pop((guild.id, panel), None)
         if settings["panel_channel_id"]:
-            await self._sync_role_picker(guild, database.get_role_picker_config(guild.id))
+            await self._sync_role_picker(guild, database.get_role_picker_config(guild.id, panel))
         await interaction.followup.send(
-            f"Added **{discord.utils.escape_markdown(role.name)}** to the role panel.",
+            f"Added **{discord.utils.escape_markdown(role.name)}** to role panel `{panel}`.",
             ephemeral=True,
         )
 
     @rolepanel.command(name="remove", description="Remove a role from the panel")
     @app_commands.guild_only()
     @app_commands.check(_management_allowed)
-    async def rolepanel_remove(self, interaction: discord.Interaction, role: discord.Role) -> None:
+    @app_commands.describe(panel="Which role panel to edit (default: default)")
+    async def rolepanel_remove(
+        self, interaction: discord.Interaction, role: discord.Role, panel: str = "default"
+    ) -> None:
         guild = interaction.guild
         if guild is None:
             return await interaction.response.send_message("Run this command in a server.", ephemeral=True)
-        settings = database.get_role_picker_config(guild.id)
+        panel = panel.strip().lower()
+        if panel not in database.list_role_picker_panels(guild.id):
+            return await interaction.response.send_message(f"Unknown role panel `{panel}`.", ephemeral=True)
+        settings = database.get_role_picker_config(guild.id, panel)
         if role.id not in settings["role_ids"]:
             return await interaction.response.send_message("That role is not on the panel.", ephemeral=True)
         settings["role_ids"].remove(role.id)
@@ -691,20 +785,24 @@ class RolePanels(commands.Cog):
             settings["description"],
             settings["role_ids"],
             settings["allow_multiple"],
+            panel,
         )
         await interaction.response.defer(ephemeral=True, thinking=True)
-        self._synced_roles.pop(guild.id, None)
+        self._synced_roles.pop((guild.id, panel), None)
         if settings["panel_channel_id"]:
-            await self._sync_role_picker(guild, database.get_role_picker_config(guild.id))
+            await self._sync_role_picker(guild, database.get_role_picker_config(guild.id, panel))
         await interaction.followup.send(
-            f"Removed **{discord.utils.escape_markdown(role.name)}** from the role panel.",
+            f"Removed **{discord.utils.escape_markdown(role.name)}** from role panel `{panel}`.",
             ephemeral=True,
         )
 
     @rolepanel.command(name="mode", description="Choose one role or multiple roles")
     @app_commands.guild_only()
     @app_commands.check(_management_allowed)
-    @app_commands.describe(mode="One role replaces the previous choice; multiple mode toggles each choice")
+    @app_commands.describe(
+        mode="One role replaces the previous choice; multiple mode toggles each choice",
+        panel="Which role panel to edit (default: default)",
+    )
     @app_commands.choices(
         mode=[
             app_commands.Choice(name="One role at a time", value="single"),
@@ -712,12 +810,15 @@ class RolePanels(commands.Cog):
         ]
     )
     async def rolepanel_mode(
-        self, interaction: discord.Interaction, mode: app_commands.Choice[str]
+        self, interaction: discord.Interaction, mode: app_commands.Choice[str], panel: str = "default"
     ) -> None:
         guild = interaction.guild
         if guild is None:
             return await interaction.response.send_message("Run this command in a server.", ephemeral=True)
-        settings = database.get_role_picker_config(guild.id)
+        panel = panel.strip().lower()
+        if panel not in database.list_role_picker_panels(guild.id):
+            return await interaction.response.send_message(f"Unknown role panel `{panel}`.", ephemeral=True)
+        settings = database.get_role_picker_config(guild.id, panel)
         allow_multiple = mode.value == "multiple"
         database.save_role_picker_config(
             guild.id,
@@ -726,38 +827,47 @@ class RolePanels(commands.Cog):
             settings["description"],
             settings["role_ids"],
             allow_multiple,
+            panel,
         )
         await interaction.response.defer(ephemeral=True, thinking=True)
-        self._synced_roles.pop(guild.id, None)
+        self._synced_roles.pop((guild.id, panel), None)
         if settings["panel_channel_id"] and settings["role_ids"]:
-            await self._sync_role_picker(guild, database.get_role_picker_config(guild.id))
+            await self._sync_role_picker(guild, database.get_role_picker_config(guild.id, panel))
         mode_label = "multiple roles" if allow_multiple else "one role at a time"
-        await interaction.followup.send(f"Role picker mode set to {mode_label}.", ephemeral=True)
+        await interaction.followup.send(f"Role panel `{panel}` mode set to {mode_label}.", ephemeral=True)
 
     @rolepanel.command(name="publish", description="Send or refresh the configured role picker panel")
     @app_commands.guild_only()
     @app_commands.check(_management_allowed)
-    async def rolepanel_publish(self, interaction: discord.Interaction) -> None:
+    @app_commands.describe(panel="Which role panel to publish (default: default)")
+    async def rolepanel_publish(self, interaction: discord.Interaction, panel: str = "default") -> None:
         guild = interaction.guild
         if guild is None:
             return await interaction.response.send_message("Run this command in a server.", ephemeral=True)
         await interaction.response.defer(ephemeral=True, thinking=True)
-        self._synced_roles.pop(guild.id, None)
-        if not await self._sync_role_picker(guild, database.get_role_picker_config(guild.id)):
+        panel = panel.strip().lower()
+        if panel not in database.list_role_picker_panels(guild.id):
+            return await interaction.followup.send(f"Unknown role panel `{panel}`.", ephemeral=True)
+        self._synced_roles.pop((guild.id, panel), None)
+        if not await self._sync_role_picker(guild, database.get_role_picker_config(guild.id, panel)):
             return await interaction.followup.send(
                 "Set a panel channel and add at least one safe, assignable role before publishing.",
                 ephemeral=True,
             )
-        await interaction.followup.send("The role picker panel is up to date.", ephemeral=True)
+        await interaction.followup.send(f"Role panel `{panel}` is up to date.", ephemeral=True)
 
     @rolepanel.command(name="list", description="Show roles currently configured on the panel")
     @app_commands.guild_only()
     @app_commands.check(_management_allowed)
-    async def rolepanel_list(self, interaction: discord.Interaction) -> None:
+    @app_commands.describe(panel="Which role panel to show (default: default)")
+    async def rolepanel_list(self, interaction: discord.Interaction, panel: str = "default") -> None:
         guild = interaction.guild
         if guild is None:
             return await interaction.response.send_message("Run this command in a server.", ephemeral=True)
-        settings = database.get_role_picker_config(guild.id)
+        panel = panel.strip().lower()
+        if panel not in database.list_role_picker_panels(guild.id):
+            return await interaction.response.send_message(f"Unknown role panel `{panel}`.", ephemeral=True)
+        settings = database.get_role_picker_config(guild.id, panel)
         names = [
             f"• {discord.utils.escape_markdown(role.name)}"
             for role_id in settings["role_ids"]
@@ -766,7 +876,7 @@ class RolePanels(commands.Cog):
         mode = "Multiple roles" if settings["allow_multiple"] else "One role at a time"
         channel = f"{settings['panel_channel_id']}" if settings["panel_channel_id"] else "Not configured"
         embed = discord.Embed(
-            title="Self-assign role panel",
+            title=f"Self-assign role panel: {panel}",
             description="\n".join(names) if names else "No roles configured yet.",
             color=0x91A8FF,
         )

@@ -281,6 +281,19 @@ def initialize() -> None:
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
                 )
                 connection.execute(
+                    """CREATE TABLE IF NOT EXISTS role_picker_panels (
+                        guild_id BIGINT NOT NULL,
+                        panel_id VARCHAR(32) NOT NULL,
+                        panel_channel_id BIGINT NULL,
+                        panel_message_id BIGINT NULL,
+                        title VARCHAR(256) NOT NULL DEFAULT 'Choose your roles',
+                        description VARCHAR(4000) NOT NULL DEFAULT 'Choose the roles you want from the menu below.',
+                        role_ids TEXT NULL,
+                        allow_multiple TINYINT(1) NOT NULL DEFAULT 0,
+                        PRIMARY KEY (guild_id, panel_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
+                )
+                connection.execute(
                     """CREATE TABLE IF NOT EXISTS verification_settings (
                         guild_id BIGINT NOT NULL PRIMARY KEY,
                         panel_channel_id BIGINT NULL,
@@ -380,6 +393,19 @@ def initialize() -> None:
                         description TEXT NOT NULL DEFAULT 'Choose the roles you want from the menu below.',
                         role_ids TEXT NOT NULL DEFAULT '',
                         allow_multiple INTEGER NOT NULL DEFAULT 0
+                    )"""
+                )
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS role_picker_panels (
+                        guild_id INTEGER NOT NULL,
+                        panel_id TEXT NOT NULL,
+                        panel_channel_id INTEGER,
+                        panel_message_id INTEGER,
+                        title TEXT NOT NULL DEFAULT 'Choose your roles',
+                        description TEXT NOT NULL DEFAULT 'Choose the roles you want from the menu below.',
+                        role_ids TEXT NOT NULL DEFAULT '',
+                        allow_multiple INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY (guild_id, panel_id)
                     )"""
                 )
                 connection.execute(
@@ -991,11 +1017,15 @@ def set_ticket_panel_message(guild_id: int, message_id: int | None) -> None:
         )
 
 
-def get_role_picker_config(guild_id: int) -> dict:
+def get_role_picker_config(guild_id: int, panel_id: str = "default") -> dict:
+    query = (
+        "SELECT * FROM role_picker_settings WHERE guild_id = ?"
+        if panel_id == "default"
+        else "SELECT * FROM role_picker_panels WHERE guild_id = ? AND panel_id = ?"
+    )
     with closing(_connect()) as connection, connection:
-        row = connection.execute(
-            "SELECT * FROM role_picker_settings WHERE guild_id = ?", (guild_id,)
-        ).fetchone()
+        params = (guild_id,) if panel_id == "default" else (guild_id, panel_id)
+        row = connection.execute(query, params).fetchone()
     result = {
         "guild_id": guild_id,
         "panel_channel_id": None,
@@ -1004,6 +1034,7 @@ def get_role_picker_config(guild_id: int) -> dict:
         "description": "Choose the roles you want from the menu below.",
         "role_ids": [],
         "allow_multiple": False,
+        "panel_id": panel_id,
     }
     if row:
         saved = dict(row)
@@ -1019,10 +1050,49 @@ def get_role_picker_config(guild_id: int) -> dict:
 
 def get_all_role_picker_configs() -> list[dict]:
     with closing(_connect()) as connection, connection:
-        rows = connection.execute(
+        legacy_rows = connection.execute(
             "SELECT guild_id FROM role_picker_settings ORDER BY guild_id"
         ).fetchall()
-    return [get_role_picker_config(int(row["guild_id"])) for row in rows]
+        panel_rows = connection.execute(
+            "SELECT guild_id, panel_id FROM role_picker_panels ORDER BY guild_id, panel_id"
+        ).fetchall()
+    configs = [get_role_picker_config(int(row["guild_id"])) for row in legacy_rows]
+    configs.extend(
+        get_role_picker_config(int(row["guild_id"]), str(row["panel_id"]))
+        for row in panel_rows
+    )
+    return configs
+
+
+def list_role_picker_panels(guild_id: int) -> list[str]:
+    with closing(_connect()) as connection, connection:
+        rows = connection.execute(
+            "SELECT panel_id FROM role_picker_panels WHERE guild_id = ? ORDER BY panel_id",
+            (guild_id,),
+        ).fetchall()
+    return ["default", *(str(row["panel_id"]) for row in rows)]
+
+
+def create_role_picker_panel(guild_id: int, panel_id: str) -> bool:
+    with closing(_connect()) as connection, connection:
+        insert = (
+            "INSERT IGNORE INTO role_picker_panels (guild_id, panel_id) VALUES (?, ?)"
+            if connection.engine == "mysql"
+            else "INSERT OR IGNORE INTO role_picker_panels (guild_id, panel_id) VALUES (?, ?)"
+        )
+        cursor = connection.execute(insert, (guild_id, panel_id))
+        return cursor.rowcount > 0
+
+
+def delete_role_picker_panel(guild_id: int, panel_id: str) -> bool:
+    if panel_id == "default":
+        return False
+    with closing(_connect()) as connection, connection:
+        cursor = connection.execute(
+            "DELETE FROM role_picker_panels WHERE guild_id = ? AND panel_id = ?",
+            (guild_id, panel_id),
+        )
+        return cursor.rowcount > 0
 
 
 def save_role_picker_config(
@@ -1032,9 +1102,18 @@ def save_role_picker_config(
     description: str,
     role_ids: list[int],
     allow_multiple: bool,
+    panel_id: str = "default",
 ) -> None:
     role_value = ",".join(str(role_id) for role_id in role_ids)
     with closing(_connect()) as connection, connection:
+        if panel_id != "default":
+            connection.execute(
+                """UPDATE role_picker_panels SET panel_channel_id = ?, title = ?,
+                description = ?, role_ids = ?, allow_multiple = ?
+                WHERE guild_id = ? AND panel_id = ?""",
+                (panel_channel_id, title, description, role_value, int(allow_multiple), guild_id, panel_id),
+            )
+            return
         insert = (
             "INSERT IGNORE INTO role_picker_settings (guild_id) VALUES (?)"
             if connection.engine == "mysql"
@@ -1048,11 +1127,16 @@ def save_role_picker_config(
         )
 
 
-def set_role_picker_panel_message(guild_id: int, message_id: int | None) -> None:
+def set_role_picker_panel_message(
+    guild_id: int, message_id: int | None, panel_id: str = "default"
+) -> None:
     with closing(_connect()) as connection, connection:
+        table = "role_picker_settings" if panel_id == "default" else "role_picker_panels"
+        where = "guild_id = ?" if panel_id == "default" else "guild_id = ? AND panel_id = ?"
+        params = (message_id, guild_id) if panel_id == "default" else (message_id, guild_id, panel_id)
         connection.execute(
-            "UPDATE role_picker_settings SET panel_message_id = ? WHERE guild_id = ?",
-            (message_id, guild_id),
+            f"UPDATE {table} SET panel_message_id = ? WHERE {where}",
+            params,
         )
 
 

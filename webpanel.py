@@ -235,8 +235,30 @@ def _dashboard_html(request: web.Request, guild_id: int | None, message: str = "
 <p class="hint">One category per line: emoji | title | description | optional Discord category channel ID. Leave the emoji or final channel ID blank if unused. Up to 25 categories.</p>
 <button type="submit">Save ticket settings</button></form></section>"""
 
+        role_picker = database.get_role_picker_config(selected)
+        role_ids = ", ".join(str(role_id) for role_id in role_picker["role_ids"])
+        single_selected = " selected" if not role_picker["allow_multiple"] else ""
+        multiple_selected = " selected" if role_picker["allow_multiple"] else ""
+        content += f"""<section class="card wide"><div class="card-head"><div><h2>Self-assign role panel</h2><p>Members choose only from the roles listed here. The bot adds or removes the chosen roles.</p></div></div>
+<form method="post" action="/role-picker/settings"><input type="hidden" name="csrf" value="{_escape(csrf)}"><input type="hidden" name="guild_id" value="{selected}">
+<div class="inline"><label>Panel channel ID<input name="panel_channel_id" type="number" min="1" value="{_escape(role_picker['panel_channel_id'] or '')}" placeholder="Discord text channel ID"></label><label>Selection mode<select name="mode"><option value="single"{single_selected}>One role at a time</option><option value="multiple"{multiple_selected}>Multiple roles</option></select></label></div>
+<label>Panel title<input name="title" maxlength="256" value="{_escape(role_picker['title'])}" required></label>
+<label>Panel description<textarea name="description" maxlength="4000" required>{_escape(role_picker['description'])}</textarea></label>
+<label>Available role IDs<input name="role_ids" value="{_escape(role_ids)}" placeholder="Comma-separated Discord role IDs"></label>
+<p class="hint">Up to 25 regular roles. Admin, moderation, and management-permission roles are blocked. The bot needs Manage Roles, and each role must be below its highest role. Saving updates the panel automatically.</p>
+<button type="submit">Save role panel</button></form></section>"""
+
+        verification = database.get_verification_config(selected)
+        content += f"""<section class="card wide"><div class="card-head"><div><h2>Verification panel</h2><p>Members solve a short image CAPTCHA before receiving the verified role.</p></div></div>
+<form method="post" action="/verification/settings"><input type="hidden" name="csrf" value="{_escape(csrf)}"><input type="hidden" name="guild_id" value="{selected}">
+<div class="inline"><label>Panel channel ID<input name="panel_channel_id" type="number" min="1" value="{_escape(verification['panel_channel_id'] or '')}" placeholder="Discord text channel ID" required></label><label>Verified role ID<input name="verified_role_id" type="number" min="1" value="{_escape(verification['verified_role_id'] or '')}" placeholder="Discord role ID"></label></div>
+<label>Panel title<input name="title" maxlength="256" value="{_escape(verification['title'])}" required></label>
+<label>Panel description<textarea name="description" maxlength="4000" required>{_escape(verification['description'])}</textarea></label>
+<p class="hint">Use a regular role with no admin, moderation, or management permissions. The bot needs Manage Roles, and the verified role must be below its highest role. Challenges expire after five minutes.</p>
+<button type="submit">Save verification panel</button></form></section>"""
+
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Nov Bot · Management</title><style>{_CSS}</style></head>
-<body><main><header class="top"><div><div class="brand"><span class="mark">N</span><div><b>Nov Bot</b><small>Management panel</small></div></div><h1>Dashboard</h1><p class="muted">Welcome settings and community suggestions</p></div>
+<body><main><header class="top"><div><div class="brand"><span class="mark">N</span><div><b>Nov Bot</b><small>Management panel</small></div></div><h1>Dashboard</h1><p class="muted">Server settings, roles, tickets, and community tools</p></div>
 <div class="inline"><a class="button secondary" href="{_escape(builder_href)}">AI server builder</a><form class="logout" method="post" action="/logout"><input type="hidden" name="csrf" value="{_escape(csrf)}"><button class="secondary" type="submit">Sign out</button></form></div></header>
 {notice}<section class="card" style="margin-bottom:18px"><div class="card-head"><div><h2>Server</h2><p>Choose a server or enter its Discord ID</p></div></div>{server_picker}</section>
 <div class="grid">{content}</div></main></body></html>"""
@@ -610,6 +632,10 @@ async def dashboard(request: web.Request) -> web.Response:
         message = "Suggestion status updated."
     elif request.query.get("saved") == "tickets":
         message = "Ticket settings saved. The Discord panel will update shortly."
+    elif request.query.get("saved") == "role_picker":
+        message = "Role picker settings saved. The Discord panel will update shortly."
+    elif request.query.get("saved") == "verification":
+        message = "Verification settings saved. The Discord panel will update shortly."
     response = web.Response(
         text=_dashboard_html(request, guild_id, message), content_type="text/html"
     )
@@ -753,6 +779,82 @@ async def save_ticket_settings(request: web.Request) -> web.Response:
     raise web.HTTPSeeOther(f"/?{urlencode({'guild_id': guild_id, 'saved': 'tickets'})}")
 
 
+def _form_guild_id(form) -> int:
+    try:
+        guild_id = int(str(form.get("guild_id", "")))
+    except ValueError as error:
+        raise web.HTTPBadRequest(text="Invalid server ID.") from error
+    if not 0 < guild_id <= 2**63 - 1:
+        raise web.HTTPBadRequest(text="Invalid server ID.")
+    return guild_id
+
+
+def _form_optional_id(value: object, label: str) -> int | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        result = int(raw)
+    except ValueError as error:
+        raise web.HTTPBadRequest(text=f"{label} must be a positive Discord ID.") from error
+    if not 0 < result <= 2**63 - 1:
+        raise web.HTTPBadRequest(text=f"{label} must be a positive Discord ID.")
+    return result
+
+
+async def save_role_picker_settings(request: web.Request) -> web.Response:
+    form = await request.post()
+    _check_csrf(request, form)
+    guild_id = _form_guild_id(form)
+    panel_channel_id = _form_optional_id(form.get("panel_channel_id"), "Panel channel")
+    if panel_channel_id is None:
+        raise web.HTTPBadRequest(text="Set a panel channel ID.")
+    title = str(form.get("title", "")).strip()
+    description = str(form.get("description", "")).strip()
+    if not title or len(title) > 256 or not description or len(description) > 4000:
+        raise web.HTTPBadRequest(text="Panel title must be 1–256 characters and description 1–4000 characters.")
+    mode = str(form.get("mode", "single"))
+    if mode not in {"single", "multiple"}:
+        raise web.HTTPBadRequest(text="Choose a valid role selection mode.")
+    role_ids = []
+    for raw in str(form.get("role_ids", "")).split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        role_id = _form_optional_id(raw, "Role ID")
+        if role_id not in role_ids:
+            role_ids.append(role_id)
+    if len(role_ids) > 25:
+        raise web.HTTPBadRequest(text="Configure no more than 25 selectable roles.")
+    database.save_role_picker_config(
+        guild_id,
+        panel_channel_id,
+        title,
+        description,
+        role_ids,
+        mode == "multiple",
+    )
+    raise web.HTTPSeeOther(f"/?{urlencode({'guild_id': guild_id, 'saved': 'role_picker'})}")
+
+
+async def save_verification_settings(request: web.Request) -> web.Response:
+    form = await request.post()
+    _check_csrf(request, form)
+    guild_id = _form_guild_id(form)
+    panel_channel_id = _form_optional_id(form.get("panel_channel_id"), "Panel channel")
+    verified_role_id = _form_optional_id(form.get("verified_role_id"), "Verified role")
+    if panel_channel_id is None:
+        raise web.HTTPBadRequest(text="Set a panel channel ID.")
+    title = str(form.get("title", "")).strip()
+    description = str(form.get("description", "")).strip()
+    if not title or len(title) > 256 or not description or len(description) > 4000:
+        raise web.HTTPBadRequest(text="Panel title must be 1–256 characters and description 1–4000 characters.")
+    database.save_verification_config(
+        guild_id, panel_channel_id, verified_role_id, title, description
+    )
+    raise web.HTTPSeeOther(f"/?{urlencode({'guild_id': guild_id, 'saved': 'verification'})}")
+
+
 async def logout(request: web.Request) -> web.Response:
     form = await request.post()
     _check_csrf(request, form)
@@ -780,6 +882,8 @@ def create_app() -> web.Application:
             web.post("/settings", save_settings),
             web.post("/suggestions/status", update_suggestion),
             web.post("/tickets/settings", save_ticket_settings),
+            web.post("/role-picker/settings", save_role_picker_settings),
+            web.post("/verification/settings", save_verification_settings),
             web.post("/logout", logout),
         ]
     )

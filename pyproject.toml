@@ -9,4 +9,5 @@ dependencies = [
     "discord-py>=2.7.1",
     "dotenv>=0.9.9",
     "pymysql>=1.1.1",
+    "pillow>=10.1",
 ]

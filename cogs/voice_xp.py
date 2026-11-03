@@ -151,13 +151,23 @@ class VoiceXP(commands.Cog):
             return
         role_note = ""
         if granted_roles:
-            role_note = " Reward role: " + ", ".join(
-                role.name for role in granted_roles
-            ) + "."
+            reward_names = ", ".join(
+                discord.utils.escape_markdown(role.name) for role in granted_roles
+            )
+            role_note = f"\n\nReward unlocked: {reward_names}."
         try:
+            embed = discord.Embed(
+                title="🎉 Level Up!",
+                description=(
+                    f"Congratulations, **{discord.utils.escape_markdown(member.display_name)}**! "
+                    f"You reached level **{level}**.{role_note}"
+                ),
+                color=member.color if member.color.value else discord.Color.blurple(),
+            )
+            embed.set_thumbnail(url=member.display_avatar.url)
             await channel.send(
-                f"🎉 **{discord.utils.escape_markdown(member.display_name)}** "
-                f"reached Level {level}!{role_note}"
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions.none(),
             )
         except discord.HTTPException:
             log.debug("Could not announce level-up in guild %s", guild.id)

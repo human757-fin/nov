@@ -2,3 +2,4 @@ aiohttp>=3.9
 discord.py>=2.7.1
 dotenv>=0.9.9
 PyMySQL>=1.1.1
+Pillow>=10.1

@@ -270,6 +270,27 @@ def initialize() -> None:
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
                 )
                 connection.execute(
+                    """CREATE TABLE IF NOT EXISTS role_picker_settings (
+                        guild_id BIGINT NOT NULL PRIMARY KEY,
+                        panel_channel_id BIGINT NULL,
+                        panel_message_id BIGINT NULL,
+                        title VARCHAR(256) NOT NULL DEFAULT 'Choose your roles',
+                        description VARCHAR(4000) NOT NULL DEFAULT 'Choose the roles you want from the menu below.',
+                        role_ids TEXT NULL,
+                        allow_multiple TINYINT(1) NOT NULL DEFAULT 0
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
+                )
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS verification_settings (
+                        guild_id BIGINT NOT NULL PRIMARY KEY,
+                        panel_channel_id BIGINT NULL,
+                        panel_message_id BIGINT NULL,
+                        verified_role_id BIGINT NULL,
+                        title VARCHAR(256) NOT NULL DEFAULT 'Verify your account',
+                        description VARCHAR(4000) NOT NULL DEFAULT 'Complete the CAPTCHA to receive the verified role.'
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
+                )
+                connection.execute(
                     """CREATE TABLE IF NOT EXISTS voice_xp (
                         guild_id BIGINT NOT NULL,
                         user_id BIGINT NOT NULL,
@@ -348,6 +369,27 @@ def initialize() -> None:
                         closed_by INTEGER,
                         closed_at TEXT,
                         delete_after INTEGER
+                    )"""
+                )
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS role_picker_settings (
+                        guild_id INTEGER PRIMARY KEY,
+                        panel_channel_id INTEGER,
+                        panel_message_id INTEGER,
+                        title TEXT NOT NULL DEFAULT 'Choose your roles',
+                        description TEXT NOT NULL DEFAULT 'Choose the roles you want from the menu below.',
+                        role_ids TEXT NOT NULL DEFAULT '',
+                        allow_multiple INTEGER NOT NULL DEFAULT 0
+                    )"""
+                )
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS verification_settings (
+                        guild_id INTEGER PRIMARY KEY,
+                        panel_channel_id INTEGER,
+                        panel_message_id INTEGER,
+                        verified_role_id INTEGER,
+                        title TEXT NOT NULL DEFAULT 'Verify your account',
+                        description TEXT NOT NULL DEFAULT 'Complete the CAPTCHA to receive the verified role.'
                     )"""
                 )
                 connection.execute(
@@ -470,6 +512,8 @@ def get_dashboard_guild_ids() -> list[int]:
             """SELECT guild_id FROM guild_settings
             UNION SELECT guild_id FROM feature_suggestions
             UNION SELECT guild_id FROM ticket_settings
+            UNION SELECT guild_id FROM role_picker_settings
+            UNION SELECT guild_id FROM verification_settings
             ORDER BY guild_id"""
         ).fetchall()
     return [row["guild_id"] for row in rows]
@@ -484,6 +528,8 @@ def get_dashboard_guilds() -> list[dict]:
                 SELECT guild_id FROM guild_settings
                 UNION SELECT guild_id FROM feature_suggestions
                 UNION SELECT guild_id FROM ticket_settings
+                UNION SELECT guild_id FROM role_picker_settings
+                UNION SELECT guild_id FROM verification_settings
                 UNION SELECT guild_id FROM guild_metadata
             ) AS saved
             LEFT JOIN guild_metadata AS metadata ON metadata.guild_id = saved.guild_id
@@ -941,6 +987,126 @@ def set_ticket_panel_message(guild_id: int, message_id: int | None) -> None:
     with closing(_connect()) as connection, connection:
         connection.execute(
             "UPDATE ticket_settings SET panel_message_id = ? WHERE guild_id = ?",
+            (message_id, guild_id),
+        )
+
+
+def get_role_picker_config(guild_id: int) -> dict:
+    with closing(_connect()) as connection, connection:
+        row = connection.execute(
+            "SELECT * FROM role_picker_settings WHERE guild_id = ?", (guild_id,)
+        ).fetchone()
+    result = {
+        "guild_id": guild_id,
+        "panel_channel_id": None,
+        "panel_message_id": None,
+        "title": "Choose your roles",
+        "description": "Choose the roles you want from the menu below.",
+        "role_ids": [],
+        "allow_multiple": False,
+    }
+    if row:
+        saved = dict(row)
+        result.update(saved)
+        result["role_ids"] = [
+            int(role_id)
+            for role_id in (saved.get("role_ids") or "").split(",")
+            if role_id.isdigit()
+        ]
+        result["allow_multiple"] = bool(saved.get("allow_multiple"))
+    return result
+
+
+def get_all_role_picker_configs() -> list[dict]:
+    with closing(_connect()) as connection, connection:
+        rows = connection.execute(
+            "SELECT guild_id FROM role_picker_settings ORDER BY guild_id"
+        ).fetchall()
+    return [get_role_picker_config(int(row["guild_id"])) for row in rows]
+
+
+def save_role_picker_config(
+    guild_id: int,
+    panel_channel_id: int | None,
+    title: str,
+    description: str,
+    role_ids: list[int],
+    allow_multiple: bool,
+) -> None:
+    role_value = ",".join(str(role_id) for role_id in role_ids)
+    with closing(_connect()) as connection, connection:
+        insert = (
+            "INSERT IGNORE INTO role_picker_settings (guild_id) VALUES (?)"
+            if connection.engine == "mysql"
+            else "INSERT OR IGNORE INTO role_picker_settings (guild_id) VALUES (?)"
+        )
+        connection.execute(insert, (guild_id,))
+        connection.execute(
+            """UPDATE role_picker_settings SET panel_channel_id = ?, title = ?,
+            description = ?, role_ids = ?, allow_multiple = ? WHERE guild_id = ?""",
+            (panel_channel_id, title, description, role_value, int(allow_multiple), guild_id),
+        )
+
+
+def set_role_picker_panel_message(guild_id: int, message_id: int | None) -> None:
+    with closing(_connect()) as connection, connection:
+        connection.execute(
+            "UPDATE role_picker_settings SET panel_message_id = ? WHERE guild_id = ?",
+            (message_id, guild_id),
+        )
+
+
+def get_verification_config(guild_id: int) -> dict:
+    with closing(_connect()) as connection, connection:
+        row = connection.execute(
+            "SELECT * FROM verification_settings WHERE guild_id = ?", (guild_id,)
+        ).fetchone()
+    result = {
+        "guild_id": guild_id,
+        "panel_channel_id": None,
+        "panel_message_id": None,
+        "verified_role_id": None,
+        "title": "Verify your account",
+        "description": "Complete the CAPTCHA to receive the verified role.",
+    }
+    if row:
+        result.update(dict(row))
+    return result
+
+
+def get_all_verification_configs() -> list[dict]:
+    with closing(_connect()) as connection, connection:
+        rows = connection.execute(
+            "SELECT guild_id FROM verification_settings ORDER BY guild_id"
+        ).fetchall()
+    return [get_verification_config(int(row["guild_id"])) for row in rows]
+
+
+def save_verification_config(
+    guild_id: int,
+    panel_channel_id: int | None,
+    verified_role_id: int | None,
+    title: str,
+    description: str,
+) -> None:
+    with closing(_connect()) as connection, connection:
+        insert = (
+            "INSERT IGNORE INTO verification_settings (guild_id) VALUES (?)"
+            if connection.engine == "mysql"
+            else "INSERT OR IGNORE INTO verification_settings (guild_id) VALUES (?)"
+        )
+        connection.execute(insert, (guild_id,))
+        connection.execute(
+            """UPDATE verification_settings SET panel_channel_id = ?,
+            verified_role_id = ?, title = ?, description = ? WHERE guild_id = ?""",
+            (panel_channel_id, verified_role_id, title, description, guild_id),
+        )
+
+
+def set_verification_panel_message(guild_id: int, message_id: int | None) -> None:
+    with closing(_connect()) as connection, connection:
+        connection.execute(
+            "UPDATE verification_settings SET panel_message_id = ? WHERE guild_id = ?",
             (message_id, guild_id),
         )
 

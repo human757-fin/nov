@@ -584,10 +584,160 @@ class RolePanels(commands.Cog):
             f"You're verified and now have {role.mention}.", ephemeral=True
         )
 
-    @app_commands.command(name="rolepanel", description="Send or refresh the configured self-assign role panel")
+    rolepanel = app_commands.Group(
+        name="rolepanel", description="Configure and publish the self-assign role panel"
+    )
+
+    @rolepanel.command(name="configure", description="Set the role panel channel and text")
     @app_commands.guild_only()
     @app_commands.check(_management_allowed)
-    async def refresh_role_panel(self, interaction: discord.Interaction) -> None:
+    @app_commands.describe(
+        channel="Where the role picker panel should be posted",
+        title="Panel heading (leave empty to keep the current title)",
+        description="Panel instructions (leave empty to keep the current text)",
+        mode="Whether members may choose one role or multiple roles",
+    )
+    @app_commands.choices(
+        mode=[
+            app_commands.Choice(name="One role at a time", value="single"),
+            app_commands.Choice(name="Multiple roles", value="multiple"),
+        ]
+    )
+    async def rolepanel_configure(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel,
+        title: str | None = None,
+        description: str | None = None,
+        mode: app_commands.Choice[str] | None = None,
+    ) -> None:
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message("Run this command in a server.", ephemeral=True)
+        settings = database.get_role_picker_config(guild.id)
+        title = (title.strip() if title is not None else settings["title"])
+        description = (description.strip() if description is not None else settings["description"])
+        if not title or len(title) > 256 or not description or len(description) > 4000:
+            return await interaction.response.send_message(
+                "Use a title of 1–256 characters and a description of 1–4000 characters.",
+                ephemeral=True,
+            )
+        allow_multiple = (
+            mode.value == "multiple" if mode is not None else settings["allow_multiple"]
+        )
+        database.save_role_picker_config(
+            guild.id, channel.id, title, description, settings["role_ids"], allow_multiple
+        )
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        self._synced_roles.pop(guild.id, None)
+        if settings["role_ids"]:
+            await self._sync_role_picker(guild, database.get_role_picker_config(guild.id))
+        await interaction.followup.send(
+            f"Role panel settings saved for {channel.mention}. Use `/rolepanel add` to add roles, then `/rolepanel publish`.",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @rolepanel.command(name="add", description="Add an assignable role to the panel")
+    @app_commands.guild_only()
+    @app_commands.check(_management_allowed)
+    async def rolepanel_add(self, interaction: discord.Interaction, role: discord.Role) -> None:
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message("Run this command in a server.", ephemeral=True)
+        if not _is_safe_self_assign_role(role):
+            return await interaction.response.send_message(
+                "That role is not assignable by the bot or has admin, moderation, or management permissions.",
+                ephemeral=True,
+            )
+        settings = database.get_role_picker_config(guild.id)
+        if role.id in settings["role_ids"]:
+            return await interaction.response.send_message("That role is already on the panel.", ephemeral=True)
+        if len(settings["role_ids"]) >= 25:
+            return await interaction.response.send_message("The role panel is limited to 25 roles.", ephemeral=True)
+        settings["role_ids"].append(role.id)
+        database.save_role_picker_config(
+            guild.id,
+            settings["panel_channel_id"],
+            settings["title"],
+            settings["description"],
+            settings["role_ids"],
+            settings["allow_multiple"],
+        )
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        self._synced_roles.pop(guild.id, None)
+        if settings["panel_channel_id"]:
+            await self._sync_role_picker(guild, database.get_role_picker_config(guild.id))
+        await interaction.followup.send(
+            f"Added **{discord.utils.escape_markdown(role.name)}** to the role panel.",
+            ephemeral=True,
+        )
+
+    @rolepanel.command(name="remove", description="Remove a role from the panel")
+    @app_commands.guild_only()
+    @app_commands.check(_management_allowed)
+    async def rolepanel_remove(self, interaction: discord.Interaction, role: discord.Role) -> None:
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message("Run this command in a server.", ephemeral=True)
+        settings = database.get_role_picker_config(guild.id)
+        if role.id not in settings["role_ids"]:
+            return await interaction.response.send_message("That role is not on the panel.", ephemeral=True)
+        settings["role_ids"].remove(role.id)
+        database.save_role_picker_config(
+            guild.id,
+            settings["panel_channel_id"],
+            settings["title"],
+            settings["description"],
+            settings["role_ids"],
+            settings["allow_multiple"],
+        )
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        self._synced_roles.pop(guild.id, None)
+        if settings["panel_channel_id"]:
+            await self._sync_role_picker(guild, database.get_role_picker_config(guild.id))
+        await interaction.followup.send(
+            f"Removed **{discord.utils.escape_markdown(role.name)}** from the role panel.",
+            ephemeral=True,
+        )
+
+    @rolepanel.command(name="mode", description="Choose one role or multiple roles")
+    @app_commands.guild_only()
+    @app_commands.check(_management_allowed)
+    @app_commands.describe(mode="One role replaces the previous choice; multiple mode toggles each choice")
+    @app_commands.choices(
+        mode=[
+            app_commands.Choice(name="One role at a time", value="single"),
+            app_commands.Choice(name="Multiple roles", value="multiple"),
+        ]
+    )
+    async def rolepanel_mode(
+        self, interaction: discord.Interaction, mode: app_commands.Choice[str]
+    ) -> None:
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message("Run this command in a server.", ephemeral=True)
+        settings = database.get_role_picker_config(guild.id)
+        allow_multiple = mode.value == "multiple"
+        database.save_role_picker_config(
+            guild.id,
+            settings["panel_channel_id"],
+            settings["title"],
+            settings["description"],
+            settings["role_ids"],
+            allow_multiple,
+        )
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        self._synced_roles.pop(guild.id, None)
+        if settings["panel_channel_id"] and settings["role_ids"]:
+            await self._sync_role_picker(guild, database.get_role_picker_config(guild.id))
+        mode_label = "multiple roles" if allow_multiple else "one role at a time"
+        await interaction.followup.send(f"Role picker mode set to {mode_label}.", ephemeral=True)
+
+    @rolepanel.command(name="publish", description="Send or refresh the configured role picker panel")
+    @app_commands.guild_only()
+    @app_commands.check(_management_allowed)
+    async def rolepanel_publish(self, interaction: discord.Interaction) -> None:
         guild = interaction.guild
         if guild is None:
             return await interaction.response.send_message("Run this command in a server.", ephemeral=True)
@@ -595,15 +745,108 @@ class RolePanels(commands.Cog):
         self._synced_roles.pop(guild.id, None)
         if not await self._sync_role_picker(guild, database.get_role_picker_config(guild.id)):
             return await interaction.followup.send(
-                "Configure the role panel, assignable roles, and bot permissions in the management page first.",
+                "Set a panel channel and add at least one safe, assignable role before publishing.",
                 ephemeral=True,
             )
-        await interaction.followup.send("The self-assign role panel is up to date.", ephemeral=True)
+        await interaction.followup.send("The role picker panel is up to date.", ephemeral=True)
 
-    @app_commands.command(name="verificationpanel", description="Send or refresh the configured verification panel")
+    @rolepanel.command(name="list", description="Show roles currently configured on the panel")
     @app_commands.guild_only()
     @app_commands.check(_management_allowed)
-    async def refresh_verification_panel(self, interaction: discord.Interaction) -> None:
+    async def rolepanel_list(self, interaction: discord.Interaction) -> None:
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message("Run this command in a server.", ephemeral=True)
+        settings = database.get_role_picker_config(guild.id)
+        names = [
+            f"• {discord.utils.escape_markdown(role.name)}"
+            for role_id in settings["role_ids"]
+            if (role := guild.get_role(role_id)) is not None
+        ]
+        mode = "Multiple roles" if settings["allow_multiple"] else "One role at a time"
+        channel = f"{settings['panel_channel_id']}" if settings["panel_channel_id"] else "Not configured"
+        embed = discord.Embed(
+            title="Self-assign role panel",
+            description="\n".join(names) if names else "No roles configured yet.",
+            color=0x91A8FF,
+        )
+        embed.add_field(name="Mode", value=mode)
+        embed.add_field(name="Channel ID", value=channel)
+        await interaction.response.send_message(
+            embed=embed, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
+        )
+
+    verificationpanel = app_commands.Group(
+        name="verificationpanel", description="Configure and publish account verification"
+    )
+
+    @verificationpanel.command(name="configure", description="Set the verification channel and verified role")
+    @app_commands.guild_only()
+    @app_commands.check(_management_allowed)
+    @app_commands.describe(
+        channel="Where the verification panel should be posted",
+        role="Regular verified role with no admin or moderation permissions",
+        title="Panel heading (leave empty to keep the current title)",
+        description="Panel instructions (leave empty to keep the current text)",
+    )
+    async def verificationpanel_configure(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel,
+        role: discord.Role,
+        title: str | None = None,
+        description: str | None = None,
+    ) -> None:
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message("Run this command in a server.", ephemeral=True)
+        if not _is_safe_self_assign_role(role):
+            return await interaction.response.send_message(
+                "Choose an assignable verified role without admin, moderation, or management permissions.",
+                ephemeral=True,
+            )
+        settings = database.get_verification_config(guild.id)
+        title = title.strip() if title is not None else settings["title"]
+        description = description.strip() if description is not None else settings["description"]
+        if not title or len(title) > 256 or not description or len(description) > 4000:
+            return await interaction.response.send_message(
+                "Use a title of 1–256 characters and a description of 1–4000 characters.",
+                ephemeral=True,
+            )
+        database.save_verification_config(guild.id, channel.id, role.id, title, description)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        self._synced_verification.pop(guild.id, None)
+        await self._sync_verification(guild, database.get_verification_config(guild.id))
+        await interaction.followup.send(
+            f"Verification panel settings saved for {channel.mention}.",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @verificationpanel.command(name="disable", description="Disable and remove the verification panel")
+    @app_commands.guild_only()
+    @app_commands.check(_management_allowed)
+    async def verificationpanel_disable(self, interaction: discord.Interaction) -> None:
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message("Run this command in a server.", ephemeral=True)
+        settings = database.get_verification_config(guild.id)
+        database.save_verification_config(
+            guild.id,
+            settings["panel_channel_id"],
+            None,
+            settings["title"],
+            settings["description"],
+        )
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        self._synced_verification.pop(guild.id, None)
+        await self._sync_verification(guild, database.get_verification_config(guild.id))
+        await interaction.followup.send("Verification panel disabled.", ephemeral=True)
+
+    @verificationpanel.command(name="publish", description="Send or refresh the configured verification panel")
+    @app_commands.guild_only()
+    @app_commands.check(_management_allowed)
+    async def verificationpanel_publish(self, interaction: discord.Interaction) -> None:
         guild = interaction.guild
         if guild is None:
             return await interaction.response.send_message("Run this command in a server.", ephemeral=True)
@@ -611,7 +854,7 @@ class RolePanels(commands.Cog):
         self._synced_verification.pop(guild.id, None)
         if not await self._sync_verification(guild, database.get_verification_config(guild.id)):
             return await interaction.followup.send(
-                "Configure the verification channel and verified role in the management page first.",
+                "Configure a verification channel and a safe, assignable verified role first.",
                 ephemeral=True,
             )
         await interaction.followup.send("The verification panel is up to date.", ephemeral=True)

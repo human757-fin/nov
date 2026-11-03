@@ -615,6 +615,219 @@ class Tickets(commands.Cog):
     async def before_cleanup_closed_tickets(self):
         await self.bot.wait_until_ready()
 
+    ticketpanel = app_commands.Group(
+        name="ticketpanel", description="Configure support ticket panels and staff"
+    )
+
+    async def _save_ticket_panel_config(self, guild: discord.Guild, ticket_config: dict) -> None:
+        database.save_ticket_config(
+            guild.id,
+            ticket_config["panel_channel_id"],
+            ticket_config["log_channel_id"],
+            ticket_config["admin_role_ids"],
+            ticket_config["categories"],
+        )
+        self._synced_panel_state.pop(guild.id, None)
+        await self._sync_guild_panel(guild, database.get_ticket_config(guild.id))
+
+    @ticketpanel.command(name="configure", description="Set the support ticket panel channel")
+    @app_commands.guild_only()
+    @app_commands.check(_can_manage_panel)
+    async def ticketpanel_configure(
+        self, interaction: discord.Interaction, channel: discord.TextChannel
+    ):
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message("Run this command in a server.", ephemeral=True)
+        ticket_config = database.get_ticket_config(guild.id)
+        ticket_config["panel_channel_id"] = channel.id
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await self._save_ticket_panel_config(guild, ticket_config)
+        await interaction.followup.send(
+            f"Ticket panel channel set to {channel.mention}.",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @ticketpanel.command(name="log", description="Set or clear the ticket log channel")
+    @app_commands.guild_only()
+    @app_commands.check(_can_manage_panel)
+    async def ticketpanel_log(
+        self, interaction: discord.Interaction, channel: discord.TextChannel | None = None
+    ):
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message("Run this command in a server.", ephemeral=True)
+        ticket_config = database.get_ticket_config(guild.id)
+        ticket_config["log_channel_id"] = channel.id if channel else None
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await self._save_ticket_panel_config(guild, ticket_config)
+        destination = channel.mention if channel else "disabled"
+        await interaction.followup.send(
+            f"Ticket logging {('set to ' + destination) if channel else destination}.",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @ticketpanel.command(name="admin-add", description="Add a ticket staff role")
+    @app_commands.guild_only()
+    @app_commands.check(_can_manage_panel)
+    async def ticketpanel_admin_add(self, interaction: discord.Interaction, role: discord.Role):
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message("Run this command in a server.", ephemeral=True)
+        if role.is_default() or role.managed:
+            return await interaction.response.send_message("Choose a regular server role.", ephemeral=True)
+        ticket_config = database.get_ticket_config(guild.id)
+        if role.id in ticket_config["admin_role_ids"]:
+            return await interaction.response.send_message("That role is already a ticket staff role.", ephemeral=True)
+        if len(ticket_config["admin_role_ids"]) >= 25:
+            return await interaction.response.send_message("Ticket settings allow at most 25 staff roles.", ephemeral=True)
+        ticket_config["admin_role_ids"].append(role.id)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await self._save_ticket_panel_config(guild, ticket_config)
+        await interaction.followup.send(
+            f"Added **{discord.utils.escape_markdown(role.name)}** to ticket staff.", ephemeral=True
+        )
+
+    @ticketpanel.command(name="admin-remove", description="Remove a ticket staff role")
+    @app_commands.guild_only()
+    @app_commands.check(_can_manage_panel)
+    async def ticketpanel_admin_remove(self, interaction: discord.Interaction, role: discord.Role):
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message("Run this command in a server.", ephemeral=True)
+        ticket_config = database.get_ticket_config(guild.id)
+        if role.id not in ticket_config["admin_role_ids"]:
+            return await interaction.response.send_message("That role is not configured as ticket staff.", ephemeral=True)
+        ticket_config["admin_role_ids"].remove(role.id)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await self._save_ticket_panel_config(guild, ticket_config)
+        await interaction.followup.send(
+            f"Removed **{discord.utils.escape_markdown(role.name)}** from ticket staff.", ephemeral=True
+        )
+
+    @ticketpanel.command(name="category-add", description="Add a support ticket category")
+    @app_commands.guild_only()
+    @app_commands.check(_can_manage_panel)
+    @app_commands.describe(
+        name="Category shown in the ticket dropdown",
+        description="Short explanation shown to members",
+        emoji="Optional Unicode or custom emoji",
+        parent="Optional Discord category where tickets should be created",
+    )
+    async def ticketpanel_category_add(
+        self,
+        interaction: discord.Interaction,
+        name: str,
+        description: str,
+        emoji: str | None = None,
+        parent: discord.CategoryChannel | None = None,
+    ):
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message("Run this command in a server.", ephemeral=True)
+        name, description = name.strip(), description.strip()
+        emoji = (emoji or "").strip()
+        if not name or len(name) > 100 or not description or len(description) > 100 or len(emoji) > 64:
+            return await interaction.response.send_message(
+                "Category name and description must be 1–100 characters; emoji must be at most 64 characters.",
+                ephemeral=True,
+            )
+        ticket_config = database.get_ticket_config(guild.id)
+        if len(ticket_config["categories"]) >= 25:
+            return await interaction.response.send_message("Ticket panels allow at most 25 categories.", ephemeral=True)
+        if any(item["name"].casefold() == name.casefold() for item in ticket_config["categories"]):
+            return await interaction.response.send_message("A category with that name already exists.", ephemeral=True)
+        ticket_config["categories"].append(
+            {
+                "name": name,
+                "description": description,
+                "emoji": emoji,
+                "parent_category_id": parent.id if parent else None,
+            }
+        )
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await self._save_ticket_panel_config(guild, ticket_config)
+        await interaction.followup.send(
+            f"Added ticket category **{discord.utils.escape_markdown(name)}**.", ephemeral=True
+        )
+
+    @ticketpanel.command(name="category-remove", description="Remove a support ticket category by name")
+    @app_commands.guild_only()
+    @app_commands.check(_can_manage_panel)
+    async def ticketpanel_category_remove(self, interaction: discord.Interaction, name: str):
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message("Run this command in a server.", ephemeral=True)
+        ticket_config = database.get_ticket_config(guild.id)
+        match = next(
+            (item for item in ticket_config["categories"] if item["name"].casefold() == name.strip().casefold()),
+            None,
+        )
+        if match is None:
+            return await interaction.response.send_message("No ticket category has that name.", ephemeral=True)
+        ticket_config["categories"].remove(match)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await self._save_ticket_panel_config(guild, ticket_config)
+        await interaction.followup.send(
+            f"Removed ticket category **{discord.utils.escape_markdown(match['name'])}**.", ephemeral=True
+        )
+
+    @ticketpanel.command(name="show", description="Show current support ticket panel settings")
+    @app_commands.guild_only()
+    @app_commands.check(_can_manage_panel)
+    async def ticketpanel_show(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message("Run this command in a server.", ephemeral=True)
+        ticket_config = database.get_ticket_config(guild.id)
+        categories = "\n".join(f"• {item['name']} — {item['description']}" for item in ticket_config["categories"])
+        staff = ", ".join(
+            role.mention
+            for role_id in ticket_config["admin_role_ids"]
+            if (role := guild.get_role(role_id)) is not None
+        ) or "None"
+        embed = discord.Embed(
+            title="Support ticket settings",
+            description=categories or "No categories configured.",
+            color=0x91A8FF,
+        )
+        embed.add_field(
+            name="Panel channel",
+            value=f"<#{ticket_config['panel_channel_id']}>" if ticket_config["panel_channel_id"] else "Not configured",
+            inline=True,
+        )
+        embed.add_field(
+            name="Log channel",
+            value=f"<#{ticket_config['log_channel_id']}>" if ticket_config["log_channel_id"] else "Disabled",
+            inline=True,
+        )
+        embed.add_field(name="Ticket staff roles", value=staff, inline=False)
+        await interaction.response.send_message(
+            embed=embed, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
+        )
+
+    @ticketpanel.command(name="publish", description="Send or refresh the configured ticket panel")
+    @app_commands.guild_only()
+    @app_commands.check(_can_manage_panel)
+    async def ticketpanel_publish(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message("Run this command in a server.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        self._synced_panel_state.pop(guild.id, None)
+        ticket_config = database.get_ticket_config(guild.id)
+        if not ticket_config["panel_channel_id"] or not ticket_config["categories"]:
+            return await interaction.followup.send(
+                "Configure a panel channel and at least one category first.", ephemeral=True
+            )
+        if not await self._sync_guild_panel(guild, ticket_config):
+            return await interaction.followup.send(
+                "I couldn't update the ticket panel. Check the channel and bot permissions.", ephemeral=True
+            )
+        await interaction.followup.send("The ticket panel is up to date.", ephemeral=True)
+
     @app_commands.command(name="panel", description="Send or refresh the configured support ticket panel")
     @app_commands.guild_only()
     @app_commands.check(_can_manage_panel)

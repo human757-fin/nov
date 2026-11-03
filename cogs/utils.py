@@ -2,8 +2,10 @@
 from typing import Literal, Optional
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
+import config
 import database
 from checks import is_bot_admin
 
@@ -136,6 +138,62 @@ class Utils(commands.Cog):
             )
         else:
             raise error
+
+    prefix_commands = app_commands.Group(
+        name="prefix", description="View or change this server's command prefix"
+    )
+
+    @prefix_commands.command(name="show", description="Show this server's command prefix")
+    @app_commands.guild_only()
+    async def prefix_show(self, interaction: discord.Interaction):
+        current = database.get_command_prefix(interaction.guild_id)
+        await interaction.response.send_message(
+            f"This server's prefix is `{current}`.",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @prefix_commands.command(name="set", description="Change this server's command prefix")
+    @app_commands.guild_only()
+    @app_commands.rename(new_prefix="prefix")
+    @app_commands.describe(new_prefix="1–5 printable characters with no spaces")
+    async def prefix_slash_set(
+        self, interaction: discord.Interaction, new_prefix: str
+    ):
+        guild = interaction.guild
+        member = interaction.user
+        if guild is None:
+            return await interaction.response.send_message(
+                "Run this command in a server.", ephemeral=True
+            )
+        is_allowed = (
+            member.id == guild.owner_id
+            or member.guild_permissions.administrator
+            or (
+                config.ADMIN_ROLE_ID != 0
+                and any(role.id == config.ADMIN_ROLE_ID for role in member.roles)
+            )
+        )
+        if not is_allowed:
+            return await interaction.response.send_message(
+                "Only the server owner, a server administrator, or the configured bot admin role can change the prefix.",
+                ephemeral=True,
+            )
+        if (
+            not 1 <= len(new_prefix) <= 5
+            or not new_prefix.isprintable()
+            or any(character.isspace() for character in new_prefix)
+        ):
+            return await interaction.response.send_message(
+                "Choose a prefix with 1–5 printable characters and no spaces.",
+                ephemeral=True,
+            )
+        database.set_command_prefix(guild.id, new_prefix)
+        await interaction.response.send_message(
+            f"Prefix changed to `{new_prefix}`. Use `{new_prefix}ping` to check it.",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     # Prefix-only, admin-only: <prefix>sync
     @commands.command(name="sync")

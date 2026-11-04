@@ -166,8 +166,11 @@ class VoiceXP(commands.Cog):
             )
             embed.set_thumbnail(url=member.display_avatar.url)
             await channel.send(
+                content=member.mention,
                 embed=embed,
-                allowed_mentions=discord.AllowedMentions.none(),
+                allowed_mentions=discord.AllowedMentions(
+                    users=[member], roles=False, everyone=False
+                ),
             )
         except discord.HTTPException:
             log.debug("Could not announce level-up in guild %s", guild.id)
